@@ -9,3 +9,9 @@ A simple Streamlit app that:
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
+```
+
+## 🌍 Deploy on Streamlit Cloud
+1. Push this repo to GitHub
+2. Go to [Streamlit Cloud](https://streamlit.io/cloud)
+3. Deploy the repo
