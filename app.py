@@ -3,10 +3,9 @@ from prophet import Prophet
 import pandas as pd
 import streamlit as st
 import math
-import requests
 
 st.set_page_config(page_title="Midcap-100 Screener", layout="wide")
-st.title("🧮 Nifty Midcap-100 Screener (Dynamic from NSE API)")
+st.title("🧮 Nifty Midcap-100 Screener (Dynamic from NSE Indices CSV)")
 
 # ---------- Helpers ----------
 def normal_cdf(x):
@@ -14,29 +13,13 @@ def normal_cdf(x):
 
 @st.cache_data(ttl=86400)
 def fetch_midcap100_tickers():
-    """Fetch Nifty Midcap 100 constituents dynamically from NSE API with session & headers."""
-    url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20MIDCAP%20100"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://www.nseindia.com/",
-    }
+    """Fetch Nifty Midcap 100 constituents dynamically from NSE Indices CSV."""
+    url = "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv"
     try:
-        session = requests.Session()
-        # Load NSE homepage first to get cookies
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-        # Now call API with cookies + headers
-        r = session.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        rows = data.get("data", [])
-        tickers = []
-        for row in rows:
-            symbol = row.get("symbol")
-            name = row.get("identifier", symbol)
-            if symbol:
-                tickers.append((name, f"{symbol}.NS"))
-        return tickers
+        df = pd.read_csv(url)
+        tickers = df["Symbol"].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
+        names = df["Company Name"].astype(str).str.strip().tolist()
+        return list(zip(names, tickers))
     except Exception as e:
         st.error(f"⚠️ Failed to fetch Midcap-100 list: {e}")
         return []
