@@ -23,11 +23,14 @@ if ticker:
         # Reset index so Date is a column
         data.reset_index(inplace=True)
 
+        # Pick correct price column
+        price_col = "Adj Close" if "Adj Close" in data.columns else "Close"
+
         st.subheader("📊 Historical Stock Prices")
-        st.line_chart(data.set_index("Date")["Adj Close"])
+        st.line_chart(data.set_index("Date")[price_col])
 
         # Prepare data for Prophet
-        df = data[["Date", "Adj Close"]].rename(columns={"Date": "ds", "Adj Close": "y"})
+        df = data[["Date", price_col]].rename(columns={"Date": "ds", price_col: "y"})
 
         # Train Prophet model
         model = Prophet(daily_seasonality=True)
