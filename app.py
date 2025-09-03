@@ -5,7 +5,7 @@ import streamlit as st
 import math
 
 st.set_page_config(page_title="Midcap-100 Screener", layout="wide")
-st.title("🧮 Nifty Midcap-100 Screener (Hybrid Fetch with Full Fallback)")
+st.title("🧮 Nifty Midcap-100 Screener (Final Hybrid Version)")
 
 # ---------- Helpers ----------
 def normal_cdf(x):
@@ -13,7 +13,7 @@ def normal_cdf(x):
 
 @st.cache_data(ttl=86400)
 def fetch_midcap100_tickers():
-    """Try to fetch Midcap 100 from NSE Indices CSV, fallback to full static list if it fails."""
+    """Try to fetch Midcap 100 from NSE Indices CSV, fallback to static list if it fails."""
     url = "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv"
     try:
         df = pd.read_csv(url)
@@ -21,7 +21,7 @@ def fetch_midcap100_tickers():
         names = df["Company Name"].astype(str).str.strip().tolist()
         return list(zip(names, tickers))
     except Exception:
-        # ---- fallback: full static list of Midcap 100 companies ----
+        # ---- full static fallback list (100 tickers) ----
         fallback_symbols = [
             "ABBOTINDIA","ALKEM","ASHOKLEY","AUBANK","AUROPHARMA","BALKRISIND","BEL","BERGEPAINT","BHEL","CANFINHOME",
             "CUMMINSIND","DALBHARAT","DEEPAKNTR","FEDERALBNK","GODREJPROP","HAVELLS","HINDZINC","IDFCFIRSTB","INDHOTEL",
@@ -38,7 +38,7 @@ def fetch_midcap100_tickers():
 
 @st.cache_data(show_spinner=False)
 def fetch_history(tkr, years=5):
-    """Fetch historical prices for a ticker."""
+    """Fetch historical prices for a ticker (cached)."""
     df = yf.download(tkr, period=f"{years}y", auto_adjust=False, progress=False)
     if df is None or df.empty:
         return pd.DataFrame()
@@ -53,7 +53,7 @@ def fetch_history(tkr, years=5):
 
 @st.cache_data(show_spinner=False)
 def fit_and_forecast(df, days=365):
-    """Fit Prophet model and forecast future prices."""
+    """Fit Prophet model and forecast future prices (cached)."""
     m = Prophet(daily_seasonality=True)
     m.fit(df)
     future = m.make_future_dataframe(periods=days)
