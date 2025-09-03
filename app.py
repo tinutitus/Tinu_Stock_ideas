@@ -16,7 +16,11 @@ if ticker:
     if data.empty:
         st.error("⚠️ No data found for this ticker. Try another symbol (e.g. AAPL, RELIANCE.NS).")
     else:
-        # Ensure Date column exists
+        # Flatten multi-level columns (if any)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = [col[0] for col in data.columns]
+
+        # Reset index so Date is a column
         data.reset_index(inplace=True)
 
         st.subheader("📊 Historical Stock Prices")
