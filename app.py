@@ -3,9 +3,10 @@ from prophet import Prophet
 import pandas as pd
 import streamlit as st
 import math
+import requests
 
 st.set_page_config(page_title="Midcap-100 Screener", layout="wide")
-st.title("🧮 Nifty Midcap-100 Screener (Dynamic from NSE)")
+st.title("🧮 Nifty Midcap-100 Screener (Dynamic from NSE API)")
 
 # ---------- Helpers ----------
 def normal_cdf(x):
@@ -13,13 +14,21 @@ def normal_cdf(x):
 
 @st.cache_data(ttl=86400)
 def fetch_midcap100_tickers():
-    """Fetch Nifty Midcap 100 constituents from NSE CSV (refreshes daily)."""
-    url = "https://www.nseindia.com/content/indices/NIFTY-MIDCAP-100.csv"
+    """Fetch Nifty Midcap 100 constituents dynamically from NSE API (JSON)."""
+    url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20MIDCAP%20100"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        df = pd.read_csv(url)
-        tickers = df["Symbol"].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
-        names = df["Company Name"].astype(str).str.strip().tolist()
-        return list(zip(names, tickers))
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        rows = data.get("data", [])
+        tickers = []
+        for row in rows:
+            symbol = row.get("symbol")
+            name = row.get("identifier", symbol)
+            if symbol:
+                tickers.append((name, f"{symbol}.NS"))
+        return tickers
     except Exception as e:
         st.error(f"⚠️ Failed to fetch Midcap-100 list: {e}")
         return []
@@ -115,7 +124,7 @@ if run_btn:
     else:
         out = pd.DataFrame(rows)
 
-        # ---------- Ranks (all ascending: 1 = best) ----------
+        # ---------- Ranks (ascending: 1 = best) ----------
         out["Rank Ret 1M"] = out["Ret 1M %"].rank(ascending=False, method="min").astype(int)
         out["Rank Ret 1Y"] = out["Ret 1Y %"].rank(ascending=False, method="min").astype(int)
         out["Rank Prob 1M"] = out["Prob Up 1M"].rank(ascending=False, method="min").astype(int)
