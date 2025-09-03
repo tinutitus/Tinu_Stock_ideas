@@ -5,7 +5,7 @@ import streamlit as st
 import math
 
 st.set_page_config(page_title="Midcap-100 Screener", layout="wide")
-st.title("🧮 Nifty Midcap-100 Screener (Dynamic from NSE Indices CSV)")
+st.title("🧮 Nifty Midcap-100 Screener (Hybrid Fetch)")
 
 # ---------- Helpers ----------
 def normal_cdf(x):
@@ -13,16 +13,38 @@ def normal_cdf(x):
 
 @st.cache_data(ttl=86400)
 def fetch_midcap100_tickers():
-    """Fetch Nifty Midcap 100 constituents dynamically from NSE Indices CSV."""
+    """Try to fetch Midcap 100 from NSE Indices CSV, fallback to static list if it fails."""
     url = "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv"
     try:
         df = pd.read_csv(url)
         tickers = df["Symbol"].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
         names = df["Company Name"].astype(str).str.strip().tolist()
         return list(zip(names, tickers))
-    except Exception as e:
-        st.error(f"⚠️ Failed to fetch Midcap-100 list: {e}")
-        return []
+    except Exception:
+        # ---- fallback: static list (partial example, can extend to full 100) ----
+        fallback = [
+            ("ABBOTINDIA", "ABBOTINDIA.NS"),
+            ("ALKEM", "ALKEM.NS"),
+            ("ASHOKLEY", "ASHOKLEY.NS"),
+            ("AUBANK", "AUBANK.NS"),
+            ("AUROPHARMA", "AUROPHARMA.NS"),
+            ("BALKRISIND", "BALKRISIND.NS"),
+            ("BEL", "BEL.NS"),
+            ("BERGEPAINT", "BERGEPAINT.NS"),
+            ("BHEL", "BHEL.NS"),
+            ("CANFINHOME", "CANFINHOME.NS"),
+            ("CUMMINSIND", "CUMMINSIND.NS"),
+            ("DALBHARAT", "DALBHARAT.NS"),
+            ("DEEPAKNTR", "DEEPAKNTR.NS"),
+            ("FEDERALBNK", "FEDERALBNK.NS"),
+            ("GODREJPROP", "GODREJPROP.NS"),
+            ("HAVELLS", "HAVELLS.NS"),
+            ("HINDZINC", "HINDZINC.NS"),
+            ("IDFCFIRSTB", "IDFCFIRSTB.NS"),
+            ("INDHOTEL", "INDHOTEL.NS"),
+            ("INDIAMART", "INDIAMART.NS"),
+        ]
+        return fallback
 
 @st.cache_data(show_spinner=False)
 def fetch_history(tkr, years=5):
@@ -65,7 +87,7 @@ companies = fetch_midcap100_tickers()
 if not companies:
     st.stop()
 
-st.subheader("📊 Nifty Midcap-100 Predictions (auto-updated daily)")
+st.subheader("📊 Nifty Midcap-100 Predictions (Hybrid Fetch)")
 
 limit = st.slider("Tickers to process", min_value=5, max_value=min(100, len(companies)), value=20, step=5)
 risk_adj = st.slider("🌍 Geopolitical Risk Adjustment (%)", -20, 20, 0)
