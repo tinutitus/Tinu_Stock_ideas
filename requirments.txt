@@ -2,3 +2,4 @@ yfinance
 prophet
 streamlit
 matplotlib
+pandas
