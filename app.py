@@ -12,31 +12,36 @@ ticker = st.text_input("Enter Stock Symbol (e.g. AAPL, INFY.BO, RELIANCE.NS)", "
 if ticker:
     # Fetch last 5 years of data
     data = yf.download(ticker, period="5y")
-    data.reset_index(inplace=True)
 
-    st.subheader("📊 Historical Stock Prices")
-    st.line_chart(data[["Date", "Close"]].set_index("Date"))
+    if data.empty:
+        st.error("⚠️ No data found for this ticker. Try another symbol (e.g. AAPL, RELIANCE.NS).")
+    else:
+        # Ensure Date column exists
+        data.reset_index(inplace=True)
 
-    # Prepare data for Prophet
-    df = data[["Date", "Close"]].rename(columns={"Date": "ds", "Close": "y"})
+        st.subheader("📊 Historical Stock Prices")
+        st.line_chart(data.set_index("Date")["Adj Close"])
 
-    # Train Prophet model
-    model = Prophet(daily_seasonality=True)
-    model.fit(df)
+        # Prepare data for Prophet
+        df = data[["Date", "Adj Close"]].rename(columns={"Date": "ds", "Adj Close": "y"})
 
-    # Forecast for 1 year ahead
-    future = model.make_future_dataframe(periods=365)
-    forecast = model.predict(future)
+        # Train Prophet model
+        model = Prophet(daily_seasonality=True)
+        model.fit(df)
 
-    # Plot forecast
-    st.subheader("🔮 Forecast Chart")
-    fig1 = model.plot(forecast)
-    st.pyplot(fig1)
+        # Forecast for 1 year ahead
+        future = model.make_future_dataframe(periods=365)
+        forecast = model.predict(future)
 
-    # Predicted values
-    one_month_price = forecast.iloc[-30]["yhat"]
-    one_year_price = forecast.iloc[-1]["yhat"]
+        # Plot forecast
+        st.subheader("🔮 Forecast Chart")
+        fig1 = model.plot(forecast)
+        st.pyplot(fig1)
 
-    st.subheader("📌 Predictions")
-    st.metric("Predicted Price (1 Month)", f"${one_month_price:.2f}")
-    st.metric("Predicted Price (1 Year)", f"${one_year_price:.2f}")
+        # Predicted values
+        one_month_price = forecast.iloc[-30]["yhat"]
+        one_year_price = forecast.iloc[-1]["yhat"]
+
+        st.subheader("📌 Predictions")
+        st.metric("Predicted Price (1 Month)", f"${one_month_price:.2f}")
+        st.metric("Predicted Price (1 Year)", f"${one_year_price:.2f}")
