@@ -4,8 +4,8 @@ import pandas as pd
 import streamlit as st
 import math
 
-st.set_page_config(page_title="Stock Predictor & Midcap Screener", layout="wide")
-st.title("📈 Stock Price Predictor & Midcap-100 Screener")
+st.set_page_config(page_title="Midcap-100 Screener", layout="wide")
+st.title("🧮 Nifty Midcap-100 Screener with Fundamentals & Risk Adjustments")
 
 # ---------- Helpers ----------
 def normal_cdf(x):
@@ -45,47 +45,21 @@ def prob_above_current(fc_row, current_price):
     z = (yhat - current_price) / sigma
     return 1.0 - normal_cdf(-z)
 
-# ---------- Tabs ----------
-tab1, tab2 = st.tabs(["🔍 Single Ticker", "🧮 Nifty Midcap-100 Screener"])
+def get_fundamentals(ticker):
+    """Fetch basic fundamentals like EPS growth, revenue, net profit."""
+    try:
+        stock = yf.Ticker(ticker)
+        fin_q = stock.quarterly_financials
+        fin_y = stock.financials
+        name = stock.info.get("longName", ticker)
+        return name, fin_q, fin_y
+    except Exception:
+        return ticker, None, None
 
-# ---------- Tab 1: Single Ticker ----------
-with tab1:
-    st.subheader("Single Ticker Forecast")
-    ticker = st.text_input("Enter Stock Symbol (e.g. AAPL, RELIANCE.NS, INFY.NS)", "AAPL")
-    if ticker:
-        data = yf.download(ticker, period="5y", auto_adjust=False, progress=False)
-        if data.empty:
-            st.error("⚠️ No data found. Try another ticker (e.g., RELIANCE.NS).")
-        else:
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = [c[0] for c in data.columns]
-            data.reset_index(inplace=True)
-            price_col = "Adj Close" if "Adj Close" in data.columns else ("Close" if "Close" in data.columns else None)
-            if price_col:
-                st.line_chart(data.set_index("Date")[price_col])
-                df = data[["Date", price_col]].rename(columns={"Date": "ds", price_col: "y"})
-                m = Prophet(daily_seasonality=True)
-                m.fit(df)
-                fc = m.predict(m.make_future_dataframe(periods=365))
-                st.subheader("🔮 Forecast")
-                fig1 = m.plot(fc)
-                st.pyplot(fig1)
-                one_month = fc.iloc[-30]["yhat"]
-                one_year = fc.iloc[-1]["yhat"]
-                st.subheader("📌 Predictions")
-                colA, colB, colC = st.columns(3)
-                with colA:
-                    st.metric("Current", f"{df['y'].iloc[-1]:.2f}")
-                with colB:
-                    st.metric("1-Month", f"{one_month:.2f}")
-                with colC:
-                    st.metric("1-Year", f"{one_year:.2f}")
+# ---------- UI ----------
+st.subheader("📊 Midcap-100 Predictions with Fundamentals")
 
-# ---------- Tab 2: Midcap Screener ----------
-with tab2:
-    st.subheader("Nifty Midcap-100 Screener (Predicted ↑ vs Today)")
-
-    default_list = """ABBOTINDIA.NS
+default_list = """ABBOTINDIA.NS
 ALKEM.NS
 ASHOKLEY.NS
 AUBANK.NS
@@ -128,85 +102,94 @@ UBL.NS
 VOLTAS.NS
 ZYDUSLIFE.NS
 """
-    tickers_txt = st.text_area(
-        "Paste Midcap-100 tickers here (one per line, suffix .NS).",
-        value=default_list,
-        height=180
-    )
-    tickers = [t.strip() for t in tickers_txt.splitlines() if t.strip()]
+tickers_txt = st.text_area("Paste Midcap-100 tickers (suffix .NS):", value=default_list, height=180)
+tickers = [t.strip() for t in tickers_txt.splitlines() if t.strip()]
 
-    limit = st.slider("How many tickers to process", min_value=5, max_value=min(100, len(tickers)), value=min(20, len(tickers)), step=5)
-    run_btn = st.button("Run Screener")
+limit = st.slider("How many tickers to process", min_value=5, max_value=min(100, len(tickers)), value=min(15, len(tickers)), step=5)
+risk_adj = st.slider("🌍 Geopolitical Risk Adjustment (%)", min_value=-20, max_value=20, value=0, step=1,
+                     help="Negative reduces predicted returns, Positive boosts them")
+run_btn = st.button("Run Screener")
 
-    if run_btn and tickers:
-        rows = []
-        progress = st.progress(0)
-        for i, tkr in enumerate(tickers[:limit], start=1):
-            try:
-                df = fetch_history(tkr, years=5)
-                if df.empty or len(df) < 200:
-                    continue
-                current = float(df["y"].iloc[-1])
-                fc = fit_and_forecast(df, horizon_days=365)
-                row_30, row_365 = fc.iloc[-30], fc.iloc[-1]
-                pred_30, pred_365 = float(row_30["yhat"]), float(row_365["yhat"])
-                ret_30 = (pred_30 - current) / current * 100.0
-                ret_365 = (pred_365 - current) / current * 100.0
-                p_30 = prob_above_current(row_30, current)
-                p_365 = prob_above_current(row_365, current)
-                rows.append({
-                    "Ticker": tkr,
-                    "Current": round(current, 2),
-                    "Pred 1M": round(pred_30, 2),
-                    "Pred 1Y": round(pred_365, 2),
-                    "Ret 1M %": round(ret_30, 2),
-                    "Ret 1Y %": round(ret_365, 2),
-                    "Prob Up 1M": round(p_30, 3),
-                    "Prob Up 1Y": round(p_365, 3),
-                })
-            except Exception:
-                pass
-            progress.progress(i / max(1, min(limit, len(tickers))))
+if run_btn and tickers:
+    rows = []
+    progress = st.progress(0)
 
-        if not rows:
-            st.error("No results. Try more tickers.")
-        else:
-            out = pd.DataFrame(rows)
+    for i, tkr in enumerate(tickers[:limit], start=1):
+        try:
+            df = fetch_history(tkr, years=5)
+            if df.empty or len(df) < 200:
+                continue
+            current = float(df["y"].iloc[-1])
+            fc = fit_and_forecast(df, horizon_days=365)
 
-            # Ranks (ascending: 1 = best)
-            out["Rank Ret 1M"] = out["Ret 1M %"].rank(ascending=False, method="min").astype(int)
-            out["Rank Ret 1Y"] = out["Ret 1Y %"].rank(ascending=False, method="min").astype(int)
-            out["Rank Prob 1M"] = out["Prob Up 1M"].rank(ascending=False, method="min").astype(int)
-            out["Rank Prob 1Y"] = out["Prob Up 1Y"].rank(ascending=False, method="min").astype(int)
+            row_30, row_365 = fc.iloc[-30], fc.iloc[-1]
+            pred_30, pred_365 = float(row_30["yhat"]), float(row_365["yhat"])
 
-            out["Composite Rank"] = (
-                out["Rank Ret 1M"] + out["Rank Ret 1Y"] + out["Rank Prob 1M"] + out["Rank Prob 1Y"]
-            ) / 4.0
-            out["Composite Rank"] = out["Composite Rank"].rank(ascending=True, method="min").astype(int)
+            # Apply geopolitical adjustment
+            pred_30 *= (1 + risk_adj / 100.0)
+            pred_365 *= (1 + risk_adj / 100.0)
 
-            out = out.sort_values(["Composite Rank", "Rank Ret 1Y", "Rank Prob 1Y"]).reset_index(drop=True)
+            ret_30 = (pred_30 - current) / current * 100.0
+            ret_365 = (pred_365 - current) / current * 100.0
 
-            st.success("Done! Showing ranked results.")
+            p_30 = prob_above_current(row_30, current)
+            p_365 = prob_above_current(row_365, current)
 
-            # --- Styling ---
-            rank_cols = ["Rank Ret 1M", "Rank Ret 1Y", "Rank Prob 1M", "Rank Prob 1Y", "Composite Rank"]
-            return_cols = ["Ret 1M %", "Ret 1Y %"]
+            name, fin_q, fin_y = get_fundamentals(tkr)
 
-            def color_returns(val):
-                if val > 0:
-                    return "color: green"
-                elif val < 0:
-                    return "color: red"
-                return ""
+            rows.append({
+                "Company": name,
+                "Ticker": tkr,
+                "Current": round(current, 2),
+                "Pred 1M": round(pred_30, 2),
+                "Pred 1Y": round(pred_365, 2),
+                "Ret 1M %": round(ret_30, 2),
+                "Ret 1Y %": round(ret_365, 2),
+                "Prob Up 1M": round(p_30, 3),
+                "Prob Up 1Y": round(p_365, 3),
+            })
+        except Exception:
+            pass
+        progress.progress(i / max(1, min(limit, len(tickers))))
 
-            styled = (
-                out.style
-                .background_gradient(cmap="RdYlGn_r", subset=rank_cols)
-                .applymap(color_returns, subset=return_cols)
-            )
+    if not rows:
+        st.error("No results. Try more tickers.")
+    else:
+        out = pd.DataFrame(rows)
 
-            st.dataframe(styled, use_container_width=True)
+        # Ranks
+        out["Rank Ret 1M"] = out["Ret 1M %"].rank(ascending=False, method="min").astype(int)
+        out["Rank Ret 1Y"] = out["Ret 1Y %"].rank(ascending=False, method="min").astype(int)
+        out["Rank Prob 1M"] = out["Prob Up 1M"].rank(ascending=False, method="min").astype(int)
+        out["Rank Prob 1Y"] = out["Prob Up 1Y"].rank(ascending=False, method="min").astype(int)
 
-            # Download CSV
-            csv = out.to_csv(index=False).encode("utf-8")
-            st.download_button("Download Results (CSV)", data=csv, file_name="midcap_screener.csv", mime="text/csv")
+        out["Composite Rank"] = (
+            out["Rank Ret 1M"] + out["Rank Ret 1Y"] + out["Rank Prob 1M"] + out["Rank Prob 1Y"]
+        ) / 4.0
+        out["Composite Rank"] = out["Composite Rank"].rank(ascending=True, method="min").astype(int)
+
+        out = out.sort_values(["Composite Rank"]).reset_index(drop=True)
+
+        st.success("✅ Results Ready")
+
+        # --- Styling ---
+        rank_cols = ["Rank Ret 1M", "Rank Ret 1Y", "Rank Prob 1M", "Rank Prob 1Y", "Composite Rank"]
+        return_cols = ["Ret 1M %", "Ret 1Y %"]
+
+        def color_returns(val):
+            if val > 0:
+                return "color: green"
+            elif val < 0:
+                return "color: red"
+            return ""
+
+        styled = (
+            out.style
+            .background_gradient(cmap="RdYlGn_r", subset=rank_cols)
+            .applymap(color_returns, subset=return_cols)
+        )
+
+        st.dataframe(styled, use_container_width=True)
+
+        csv = out.to_csv(index=False).encode("utf-8")
+        st.download_button("Download Results (CSV)", data=csv, file_name="midcap_screener.csv", mime="text/csv")
