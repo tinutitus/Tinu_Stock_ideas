@@ -3,9 +3,11 @@ from prophet import Prophet
 import pandas as pd
 import streamlit as st
 import math
+import requests
+from io import StringIO
 
 st.set_page_config(page_title="Midcap-100 Screener", layout="wide")
-st.title("🧮 Nifty Midcap-100 Screener (Final Hybrid Version)")
+st.title("🧮 Nifty Midcap-100 Screener (Final Stable Version)")
 
 # ---------- Helpers ----------
 def normal_cdf(x):
@@ -13,10 +15,12 @@ def normal_cdf(x):
 
 @st.cache_data(ttl=86400)
 def fetch_midcap100_tickers():
-    """Try to fetch Midcap 100 from NSE Indices CSV, fallback to static list if it fails."""
+    """Fetch Midcap 100 list with timeout, fallback to static list if fetch fails."""
     url = "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv"
     try:
-        df = pd.read_csv(url)
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
         tickers = df["Symbol"].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
         names = df["Company Name"].astype(str).str.strip().tolist()
         return list(zip(names, tickers))
@@ -77,7 +81,7 @@ companies = fetch_midcap100_tickers()
 if not companies:
     st.stop()
 
-st.subheader("📊 Nifty Midcap-100 Predictions (Hybrid Fetch)")
+st.subheader("📊 Nifty Midcap-100 Predictions")
 
 limit = st.slider("Tickers to process", min_value=5, max_value=min(100, len(companies)), value=20, step=5)
 risk_adj = st.slider("🌍 Geopolitical Risk Adjustment (%)", -20, 20, 0)
