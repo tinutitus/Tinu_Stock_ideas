@@ -14,11 +14,19 @@ def normal_cdf(x):
 
 @st.cache_data(ttl=86400)
 def fetch_midcap100_tickers():
-    """Fetch Nifty Midcap 100 constituents dynamically from NSE API (JSON)."""
+    """Fetch Nifty Midcap 100 constituents dynamically from NSE API with session & headers."""
     url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20MIDCAP%20100"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nseindia.com/",
+    }
     try:
-        r = requests.get(url, headers=headers, timeout=10)
+        session = requests.Session()
+        # Load NSE homepage first to get cookies
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        # Now call API with cookies + headers
+        r = session.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
         rows = data.get("data", [])
