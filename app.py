@@ -5,7 +5,7 @@ import streamlit as st
 import math
 
 st.set_page_config(page_title="Midcap-100 Screener", layout="wide")
-st.title("🧮 Nifty Midcap-100 Screener (Hybrid Fetch)")
+st.title("🧮 Nifty Midcap-100 Screener (Hybrid Fetch with Full Fallback)")
 
 # ---------- Helpers ----------
 def normal_cdf(x):
@@ -13,7 +13,7 @@ def normal_cdf(x):
 
 @st.cache_data(ttl=86400)
 def fetch_midcap100_tickers():
-    """Try to fetch Midcap 100 from NSE Indices CSV, fallback to static list if it fails."""
+    """Try to fetch Midcap 100 from NSE Indices CSV, fallback to full static list if it fails."""
     url = "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv"
     try:
         df = pd.read_csv(url)
@@ -21,30 +21,20 @@ def fetch_midcap100_tickers():
         names = df["Company Name"].astype(str).str.strip().tolist()
         return list(zip(names, tickers))
     except Exception:
-        # ---- fallback: static list (partial example, can extend to full 100) ----
-        fallback = [
-            ("ABBOTINDIA", "ABBOTINDIA.NS"),
-            ("ALKEM", "ALKEM.NS"),
-            ("ASHOKLEY", "ASHOKLEY.NS"),
-            ("AUBANK", "AUBANK.NS"),
-            ("AUROPHARMA", "AUROPHARMA.NS"),
-            ("BALKRISIND", "BALKRISIND.NS"),
-            ("BEL", "BEL.NS"),
-            ("BERGEPAINT", "BERGEPAINT.NS"),
-            ("BHEL", "BHEL.NS"),
-            ("CANFINHOME", "CANFINHOME.NS"),
-            ("CUMMINSIND", "CUMMINSIND.NS"),
-            ("DALBHARAT", "DALBHARAT.NS"),
-            ("DEEPAKNTR", "DEEPAKNTR.NS"),
-            ("FEDERALBNK", "FEDERALBNK.NS"),
-            ("GODREJPROP", "GODREJPROP.NS"),
-            ("HAVELLS", "HAVELLS.NS"),
-            ("HINDZINC", "HINDZINC.NS"),
-            ("IDFCFIRSTB", "IDFCFIRSTB.NS"),
-            ("INDHOTEL", "INDHOTEL.NS"),
-            ("INDIAMART", "INDIAMART.NS"),
+        # ---- fallback: full static list of Midcap 100 companies ----
+        fallback_symbols = [
+            "ABBOTINDIA","ALKEM","ASHOKLEY","AUBANK","AUROPHARMA","BALKRISIND","BEL","BERGEPAINT","BHEL","CANFINHOME",
+            "CUMMINSIND","DALBHARAT","DEEPAKNTR","FEDERALBNK","GODREJPROP","HAVELLS","HINDZINC","IDFCFIRSTB","INDHOTEL",
+            "INDIAMART","IPCALAB","JUBLFOOD","LUPIN","MANKIND","MUTHOOTFIN","NMDC","OBEROIRLTY","PAGEIND","PERSISTENT",
+            "PFIZER","POLYCAB","RECLTD","SAIL","SRF","SUNTV","TATAELXSI","TATAPOWER","TRENT","TVSMOTOR","UBL","VOLTAS",
+            "ZYDUSLIFE","PIIND","CONCOR","APOLLOTYRE","TORNTPHARM","MPHASIS","ASTRAL","OFSS","MINDTREE","CROMPTON",
+            "ATGL","PETRONET","LTTS","ESCORTS","INDIGO","COLPAL","GILLETTE","BANKBARODA","EXIDEIND","IDBI","INDUSINDBK",
+            "LICHSGFIN","MRF","NAVINFLUOR","PFC","PNB","RAMCOCEM","RBLBANK","SHREECEM","TATACHEM","TATACOMM","TORNTPOWER",
+            "UNIONBANK","WHIRLPOOL","ZEEL","ABB","ADANIPOWER","AMBUJACEM","BANDHANBNK","CANBK","CHOLAFIN","DLF","EICHERMOT",
+            "HINDPETRO","IOC","JINDALSTEL","JSWENERGY","LICI","NTPC","ONGC","POWERGRID","SBICARD","SBILIFE","SBIN","TATAMOTORS",
+            "TATASTEEL","TECHM","UPL","VEDL","WIPRO"
         ]
-        return fallback
+        return [(sym, f"{sym}.NS") for sym in fallback_symbols]
 
 @st.cache_data(show_spinner=False)
 def fetch_history(tkr, years=5):
