@@ -1,5 +1,8 @@
 yfinance
 prophet
-streamlit
-matplotlib
 pandas
+numpy
+matplotlib
+streamlit
+requests
+scikit-learn
