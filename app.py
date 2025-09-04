@@ -29,7 +29,7 @@ MIDCAP_FALLBACK = [
     "TATASTEEL","TECHM","UPL","VEDL","WIPRO"
 ]
 
-# Compact smallcap fallbacks to stay light (you can expand later)
+# Compact smallcap fallbacks (feel free to expand later)
 SMALLCAP100_FALLBACK = [
     "ACE","ANGELONE","ANURAS","APLLTD","BBTC","BIRLACORPN","BLS","CAMS","CREDITACC","DATAPATTNS","DCXINDIA",
     "DEEPAKFERT","EIDPARRY","FINEORG","FORTIS","GNFC","HATSUN","HONAUT","INDIACEM","INGERRAND","JAMNAAUTO",
@@ -37,7 +37,6 @@ SMALLCAP100_FALLBACK = [
     "RITES","ROSSARI","SAREGAMA","SIS","SKFINDIA","SUPREMEIND","TATAINVEST","TEAMLEASE","THYROCARE","TRIVENI",
     "UJJIVANSFB","VGUARD","VOLTAMP","VTL","WELSPUNIND"
 ]
-
 SMALLCAP250_FALLBACK = [
     "AARTIIND","AFFLE","AMBER","ANANDRATHI","APLAPOLLO","ARVINDFASN","ASTERDM","ASTRAZEN","BASF","BAJAJHLDNG",
     "BALAMINES","BEML","BECTORFOOD","BLUESTARCO","BSE","CESC","CHEMPLASTS","COFORGE","CYIENT","DATAPATTNS",
@@ -57,7 +56,6 @@ def _csv_to_pairs(csv_text: str):
 
 @st.cache_data(ttl=86400)
 def fetch_constituents(index_name: str):
-    """Fetch index constituents with 5s timeout; index-specific fallback."""
     url = INDEX_URLS[index_name]
     try:
         r = requests.get(url, timeout=5)
@@ -73,10 +71,10 @@ def fetch_constituents(index_name: str):
 
 @st.cache_data(show_spinner=False)
 def batch_history(tickers, years=3):
-    """One fast call for many tickers."""
     return yf.download(tickers, period=f"{years}y", auto_adjust=False, progress=False,
                        threads=True, group_by="ticker")
 
+# --------- fast signals (adds 1D, 1M, 1Y) ----------
 def compute_signals(price_series: pd.Series):
     s = price_series.dropna()
     if s.size < 80:
@@ -88,26 +86,44 @@ def compute_signals(price_series: pd.Series):
         if s.size <= days: return np.nan
         return (y[-1]/y[-days]-1.0)*100.0
 
-    m21  = mom(21)     # ~1M
-    m63  = mom(63)     # ~3M
-    m252 = mom(252)    # ~1Y (if available)
+    # momentum windows
+    m1   = mom(1)     # ~1 day
+    m5   = mom(5)     # ~1 week
+    m21  = mom(21)    # ~1 month
+    m63  = mom(63)    # ~3 months
+    m252 = mom(252)   # ~1 year if available
 
+    # volatility
     vol21 = s.pct_change().rolling(21).std().iloc[-1]
     if np.isnan(vol21): vol21 = s.pct_change().std()
 
-    # Heuristic returns with vol penalty
-    ret1m = np.clip(0.6*m21 + 0.4*m63 - 100*vol21, -50, 50)
+    # Heuristic returns with volatility penalty
+    # 1 Day: weight 1d & 5d momentum; small vol penalty; clamp to +/- 8%
+    ret1d = np.clip(0.7*(m1 if not np.isnan(m1) else 0.0) + 0.3*((m5 if not np.isnan(m5) else 0.0)/5.0) - 30*vol21, -8, 8)
+
+    # 1 Month
+    ret1m = np.clip(0.6*(m21 if not np.isnan(m21) else 0.0) + 0.4*(m63 if not np.isnan(m63) else 0.0) - 100*vol21, -50, 50)
+
+    # 1 Year
     m252_eff = m252 if not np.isnan(m252) else (m63*4 if not np.isnan(m63) else 0.0)
-    ret1y = np.clip(0.3*m63 + 0.7*m252_eff - 150*vol21, -80, 120)
+    ret1y = np.clip(0.3*(m63 if not np.isnan(m63) else 0.0) + 0.7*m252_eff - 150*vol21, -80, 120)
 
-    prob1m = float(np.clip(0.5 + (m21/100.0) - (vol21*2), 0.05, 0.95))
-    prob1y = float(np.clip(0.5 + ((m252 if not np.isnan(m252) else m63)/300.0) - (vol21*1.5), 0.05, 0.95))
+    # Prob proxies
+    prob1m = float(np.clip(0.5 + (m21/100.0 if not np.isnan(m21) else 0.0) - (vol21*2), 0.05, 0.95))
+    prob1y = float(np.clip(0.5 + ((m252/300.0) if not np.isnan(m252) else (m63/150.0 if not np.isnan(m63) else 0.0)) - (vol21*1.5), 0.05, 0.95))
+    prob1d = float(np.clip(0.5 + ((m1/25.0) if not np.isnan(m1) else 0.0) - (vol21*1.0), 0.05, 0.95))
 
+    # Predicted prices
+    pred1d = current * (1 + ret1d/100.0)
     pred1m = current * (1 + ret1m/100.0)
     pred1y = current * (1 + ret1y/100.0)
 
-    return dict(current=current, pred1m=pred1m, pred1y=pred1y, ret1m=ret1m, ret1y=ret1y,
-                prob1m=prob1m, prob1y=prob1y)
+    return dict(
+        current=current,
+        pred1d=pred1d, pred1m=pred1m, pred1y=pred1y,
+        ret1d=ret1d, ret1m=ret1m, ret1y=ret1y,
+        prob1d=prob1d, prob1m=prob1m, prob1y=prob1y
+    )
 
 # ---------------- UI ----------------
 index_choice = st.selectbox("Choose Index", list(INDEX_URLS.keys()))
@@ -138,45 +154,51 @@ if st.button("Run (Fast)"):
             if not price_col: continue
             sig = compute_signals(data[tkr][price_col])
             if not sig: continue
-            # risk adjust returns (not prices)
+
+            # apply risk adjustment to returns only
+            r1d = sig["ret1d"] * (1 + risk_adj/100.0)
             r1m = sig["ret1m"] * (1 + risk_adj/100.0)
             r1y = sig["ret1y"] * (1 + risk_adj/100.0)
-            pred1m = sig["current"] * (1 + r1m/100.0)
-            pred1y = sig["current"] * (1 + r1y/100.0)
 
             rows.append({
                 "Company": name_map.get(tkr, tkr.replace(".NS","")),
                 "Ticker": tkr,
                 "Current": round(sig["current"], 2),
-                "Pred 1M": round(pred1m, 2),
-                "Pred 1Y": round(pred1y, 2),
+                "Pred 1M": round(sig["current"] * (1 + r1m/100.0), 2),
+                "Pred 1Y": round(sig["current"] * (1 + r1y/100.0), 2),
                 "Ret 1M %": round(r1m, 2),
                 "Ret 1Y %": round(r1y, 2),
                 "Prob Up 1M": round(sig["prob1m"], 3),
                 "Prob Up 1Y": round(sig["prob1y"], 3),
+                # hidden (for Top-3 under ₹100 tables)
+                "Ret 1D %": round(r1d, 2),
+                "Pred 1D": round(sig["current"] * (1 + r1d/100.0), 2),
+                "Prob Up 1D": round(sig["prob1d"], 3),
             })
     else:
-        # Single symbol case (unlikely with limit>1)
+        # Single symbol case
         cols = list(data.columns)
         price_col = "Adj Close" if "Adj Close" in cols else ("Close" if "Close" in cols else None)
         if price_col and tickers:
             tkr = tickers[0]
             sig = compute_signals(data[price_col])
             if sig:
+                r1d = sig["ret1d"] * (1 + risk_adj/100.0)
                 r1m = sig["ret1m"] * (1 + risk_adj/100.0)
                 r1y = sig["ret1y"] * (1 + risk_adj/100.0)
-                pred1m = sig["current"] * (1 + r1m/100.0)
-                pred1y = sig["current"] * (1 + r1y/100.0)
                 rows.append({
                     "Company": name_map.get(tkr, tkr.replace(".NS","")),
                     "Ticker": tkr,
                     "Current": round(sig["current"], 2),
-                    "Pred 1M": round(pred1m, 2),
-                    "Pred 1Y": round(pred1y, 2),
+                    "Pred 1M": round(sig["current"] * (1 + r1m/100.0), 2),
+                    "Pred 1Y": round(sig["current"] * (1 + r1y/100.0), 2),
                     "Ret 1M %": round(r1m, 2),
                     "Ret 1Y %": round(r1y, 2),
                     "Prob Up 1M": round(sig["prob1m"], 3),
                     "Prob Up 1Y": round(sig["prob1y"], 3),
+                    "Ret 1D %": round(r1d, 2),
+                    "Pred 1D": round(sig["current"] * (1 + r1d/100.0), 2),
+                    "Prob Up 1D": round(sig["prob1d"], 3),
                 })
 
     if not rows:
@@ -194,27 +216,49 @@ if st.button("Run (Fast)"):
         ) / 4.0
         out["Composite Rank"] = out["Composite Rank"].rank(ascending=True, method="min").astype(int)
 
-        # Final order
-        out = out[[
+        # Final order for the MAIN table (unchanged columns)
+        main = out[[
             "Company","Ticker","Current","Pred 1M","Pred 1Y",
             "Ret 1M %","Ret 1Y %","Prob Up 1M","Prob Up 1Y","Composite Rank",
             "Rank Ret 1M","Rank Ret 1Y","Rank Prob 1M","Rank Prob 1Y"
         ]].sort_values("Composite Rank").reset_index(drop=True)
 
-        # Simple text coloring (no matplotlib)
+        # Simple red/green for returns only (no matplotlib dependency)
         def color_ret(v):
             if v > 0: return "color: green"
             if v < 0: return "color: red"
             return ""
-        styled = out.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"])
+        styled = main.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"])
+        st.subheader("📊 Ranked Screener")
         st.dataframe(styled, use_container_width=True)
 
-        csv = out.to_csv(index=False).encode()
-        st.download_button(
-            "Download CSV",
-            csv,
-            f"{index_choice.lower().replace(' ','_')}_screener_fast.csv",
-            "text/csv"
-        )
+        csv = main.to_csv(index=False).encode()
+        st.download_button("Download CSV (Main)", csv, f"{index_choice.lower().replace(' ','_')}_screener_fast.csv", "text/csv")
 
-st.caption("Fast startup. Choose Midcap 100 / Smallcap 100 / Smallcap 250. No heavy libs; batch Yahoo download for speed.")
+        # -------- Top 3 under ₹100 (separate tables) --------
+        st.markdown("### 🏆 Top 3 under ₹100 — Best by Horizon")
+        cheap = out[out["Current"] < 100].copy()
+        if cheap.empty:
+            st.info("No constituents under ₹100 in the selected set.")
+        else:
+            c1, c2, c3 = st.columns(3)
+
+            top1d = cheap.sort_values("Ret 1D %", ascending=False).head(3)[
+                ["Company","Ticker","Current","Pred 1D","Ret 1D %"]
+            ]
+            top1m = cheap.sort_values("Ret 1M %", ascending=False).head(3)[
+                ["Company","Ticker","Current","Pred 1M","Ret 1M %"]
+            ]
+            top1y = cheap.sort_values("Ret 1Y %", ascending=False).head(3)[
+                ["Company","Ticker","Current","Pred 1Y","Ret 1Y %"]
+            ]
+
+            with c1:
+                st.caption("Top 3 — **Next 1 Day**")
+                st.dataframe(top1d.reset_index(drop=True), use_container_width=True)
+            with c2:
+                st.caption("Top 3 — **Next 1 Month**")
+                st.dataframe(top1m.reset_index(drop=True), use_container_width=True)
+            with c3:
+                st.caption("Top 3 — **Next 1 Year**")
+                st.dataframe(top1y.reset_index(drop=True), use_container_width=True)
