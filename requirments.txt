@@ -1,8 +1,7 @@
 yfinance
-prophet
 pandas
 numpy
-matplotlib
 streamlit
 requests
 scikit-learn
+statsmodels
