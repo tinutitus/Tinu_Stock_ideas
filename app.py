@@ -28,8 +28,7 @@ MIDCAP_FALLBACK = [
     "HINDPETRO","IOC","JINDALSTEL","JSWENERGY","LICI","NTPC","ONGC","POWERGRID","SBICARD","SBILIFE","SBIN","TATAMOTORS",
     "TATASTEEL","TECHM","UPL","VEDL","WIPRO"
 ]
-
-# Compact smallcap fallbacks (feel free to expand later)
+# Compact smallcap fallbacks
 SMALLCAP100_FALLBACK = [
     "ACE","ANGELONE","ANURAS","APLLTD","BBTC","BIRLACORPN","BLS","CAMS","CREDITACC","DATAPATTNS","DCXINDIA",
     "DEEPAKFERT","EIDPARRY","FINEORG","FORTIS","GNFC","HATSUN","HONAUT","INDIACEM","INGERRAND","JAMNAAUTO",
@@ -74,7 +73,6 @@ def batch_history(tickers, years=3):
     return yf.download(tickers, period=f"{years}y", auto_adjust=False, progress=False,
                        threads=True, group_by="ticker")
 
-# --------- fast signals (adds 1D, 1M, 1Y) ----------
 def compute_signals(price_series: pd.Series):
     s = price_series.dropna()
     if s.size < 80:
@@ -86,34 +84,31 @@ def compute_signals(price_series: pd.Series):
         if s.size <= days: return np.nan
         return (y[-1]/y[-days]-1.0)*100.0
 
-    # momentum windows
-    m1   = mom(1)     # ~1 day
-    m5   = mom(5)     # ~1 week
-    m21  = mom(21)    # ~1 month
-    m63  = mom(63)    # ~3 months
-    m252 = mom(252)   # ~1 year if available
+    # momentum
+    m1   = mom(1)
+    m5   = mom(5)
+    m21  = mom(21)
+    m63  = mom(63)
+    m252 = mom(252)
 
     # volatility
     vol21 = s.pct_change().rolling(21).std().iloc[-1]
     if np.isnan(vol21): vol21 = s.pct_change().std()
 
-    # Heuristic returns with volatility penalty
-    # 1 Day: weight 1d & 5d momentum; small vol penalty; clamp to +/- 8%
+    # 1 Day (bounded)
     ret1d = np.clip(0.7*(m1 if not np.isnan(m1) else 0.0) + 0.3*((m5 if not np.isnan(m5) else 0.0)/5.0) - 30*vol21, -8, 8)
-
     # 1 Month
     ret1m = np.clip(0.6*(m21 if not np.isnan(m21) else 0.0) + 0.4*(m63 if not np.isnan(m63) else 0.0) - 100*vol21, -50, 50)
-
     # 1 Year
     m252_eff = m252 if not np.isnan(m252) else (m63*4 if not np.isnan(m63) else 0.0)
     ret1y = np.clip(0.3*(m63 if not np.isnan(m63) else 0.0) + 0.7*m252_eff - 150*vol21, -80, 120)
 
-    # Prob proxies
+    # prob proxies
+    prob1d = float(np.clip(0.5 + ((m1/25.0) if not np.isnan(m1) else 0.0) - (vol21*1.0), 0.05, 0.95))
     prob1m = float(np.clip(0.5 + (m21/100.0 if not np.isnan(m21) else 0.0) - (vol21*2), 0.05, 0.95))
     prob1y = float(np.clip(0.5 + ((m252/300.0) if not np.isnan(m252) else (m63/150.0 if not np.isnan(m63) else 0.0)) - (vol21*1.5), 0.05, 0.95))
-    prob1d = float(np.clip(0.5 + ((m1/25.0) if not np.isnan(m1) else 0.0) - (vol21*1.0), 0.05, 0.95))
 
-    # Predicted prices
+    # prices
     pred1d = current * (1 + ret1d/100.0)
     pred1m = current * (1 + ret1m/100.0)
     pred1y = current * (1 + ret1y/100.0)
@@ -170,13 +165,12 @@ if st.button("Run (Fast)"):
                 "Ret 1Y %": round(r1y, 2),
                 "Prob Up 1M": round(sig["prob1m"], 3),
                 "Prob Up 1Y": round(sig["prob1y"], 3),
-                # hidden (for Top-3 under ₹100 tables)
+                # extra for threshold tables
                 "Ret 1D %": round(r1d, 2),
                 "Pred 1D": round(sig["current"] * (1 + r1d/100.0), 2),
                 "Prob Up 1D": round(sig["prob1d"], 3),
             })
     else:
-        # Single symbol case
         cols = list(data.columns)
         price_col = "Adj Close" if "Adj Close" in cols else ("Close" if "Close" in cols else None)
         if price_col and tickers:
@@ -216,49 +210,56 @@ if st.button("Run (Fast)"):
         ) / 4.0
         out["Composite Rank"] = out["Composite Rank"].rank(ascending=True, method="min").astype(int)
 
-        # Final order for the MAIN table (unchanged columns)
+        # MAIN table
         main = out[[
             "Company","Ticker","Current","Pred 1M","Pred 1Y",
             "Ret 1M %","Ret 1Y %","Prob Up 1M","Prob Up 1Y","Composite Rank",
             "Rank Ret 1M","Rank Ret 1Y","Rank Prob 1M","Rank Prob 1Y"
         ]].sort_values("Composite Rank").reset_index(drop=True)
 
-        # Simple red/green for returns only (no matplotlib dependency)
+        st.subheader("📊 Ranked Screener")
         def color_ret(v):
             if v > 0: return "color: green"
             if v < 0: return "color: red"
             return ""
         styled = main.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"])
-        st.subheader("📊 Ranked Screener")
         st.dataframe(styled, use_container_width=True)
 
         csv = main.to_csv(index=False).encode()
         st.download_button("Download CSV (Main)", csv, f"{index_choice.lower().replace(' ','_')}_screener_fast.csv", "text/csv")
 
-        # -------- Top 3 under ₹100 (separate tables) --------
-        st.markdown("### 🏆 Top 3 under ₹100 — Best by Horizon")
-        cheap = out[out["Current"] < 100].copy()
-        if cheap.empty:
-            st.info("No constituents under ₹100 in the selected set.")
+        # -------- Top 3 under ₹100/₹200/₹300/₹400/₹500 --------
+        st.markdown("### 🏆 Top 3 by Price Thresholds (₹100 / ₹200 / ₹300 / ₹400 / ₹500)")
+        thresholds = [100, 200, 300, 400, 500]
+
+        if out.empty:
+            st.info("No data available for threshold tables.")
         else:
-            c1, c2, c3 = st.columns(3)
+            for thr in thresholds:
+                cheap = out[out["Current"] < thr].copy()
+                with st.expander(f"Under ₹{thr}"):
+                    if cheap.empty:
+                        st.write(f"No constituents under ₹{thr}.")
+                    else:
+                        c1, c2, c3 = st.columns(3)
+                        top1d = cheap.sort_values("Ret 1D %", ascending=False).head(3)[
+                            ["Company","Ticker","Current","Pred 1D","Ret 1D %"]
+                        ].reset_index(drop=True)
+                        top1m = cheap.sort_values("Ret 1M %", ascending=False).head(3)[
+                            ["Company","Ticker","Current","Pred 1M","Ret 1M %"]
+                        ].reset_index(drop=True)
+                        top1y = cheap.sort_values("Ret 1Y %", ascending=False).head(3)[
+                            ["Company","Ticker","Current","Pred 1Y","Ret 1Y %"]
+                        ].reset_index(drop=True)
 
-            top1d = cheap.sort_values("Ret 1D %", ascending=False).head(3)[
-                ["Company","Ticker","Current","Pred 1D","Ret 1D %"]
-            ]
-            top1m = cheap.sort_values("Ret 1M %", ascending=False).head(3)[
-                ["Company","Ticker","Current","Pred 1M","Ret 1M %"]
-            ]
-            top1y = cheap.sort_values("Ret 1Y %", ascending=False).head(3)[
-                ["Company","Ticker","Current","Pred 1Y","Ret 1Y %"]
-            ]
+                        with c1:
+                            st.caption("Top 3 — **Next 1 Day**")
+                            st.dataframe(top1d, use_container_width=True)
+                        with c2:
+                            st.caption("Top 3 — **Next 1 Month**")
+                            st.dataframe(top1m, use_container_width=True)
+                        with c3:
+                            st.caption("Top 3 — **Next 1 Year**")
+                            st.dataframe(top1y, use_container_width=True)
 
-            with c1:
-                st.caption("Top 3 — **Next 1 Day**")
-                st.dataframe(top1d.reset_index(drop=True), use_container_width=True)
-            with c2:
-                st.caption("Top 3 — **Next 1 Month**")
-                st.dataframe(top1m.reset_index(drop=True), use_container_width=True)
-            with c3:
-                st.caption("Top 3 — **Next 1 Year**")
-                st.dataframe(top1y.reset_index(drop=True), use_container_width=True)
+st.caption("Fast startup: batch Yahoo download, dynamic/fallback constituents, lightweight predictions & ranks.")
