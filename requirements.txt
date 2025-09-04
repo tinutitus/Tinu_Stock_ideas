@@ -1,7 +1,5 @@
-yfinance
+streamlit
 pandas
 numpy
-streamlit
+yfinance
 requests
-scikit-learn
-statsmodels
