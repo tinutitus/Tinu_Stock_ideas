@@ -5,15 +5,17 @@ import yfinance as yf
 import requests
 from io import StringIO
 
-st.set_page_config(page_title="NSE Midcap / Smallcap Screener (Fast)", layout="wide")
+st.set_page_config(page_title="NSE Midcap/Smallcap Screener (Fast)", layout="wide")
 st.title("⚡ NSE Midcap / Smallcap Screener — Minimal & Fast")
 
-# ---------------- Helpers ----------------
+# ---------------- Data sources ----------------
 INDEX_URLS = {
-    "Nifty Midcap 100": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
+    "Nifty Midcap 100":   "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
     "Nifty Smallcap 100": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap100list.csv",
+    "Nifty Smallcap 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
 }
 
+# Full midcap fallback (100 tickers)
 MIDCAP_FALLBACK = [
     "ABBOTINDIA","ALKEM","ASHOKLEY","AUBANK","AUROPHARMA","BALKRISIND","BEL","BERGEPAINT","BHEL","CANFINHOME",
     "CUMMINSIND","DALBHARAT","DEEPAKNTR","FEDERALBNK","GODREJPROP","HAVELLS","HINDZINC","IDFCFIRSTB","INDHOTEL",
@@ -27,13 +29,24 @@ MIDCAP_FALLBACK = [
     "TATASTEEL","TECHM","UPL","VEDL","WIPRO"
 ]
 
-# Compact smallcap fallback (not full 100; keeps app small & fast)
-SMALLCAP_FALLBACK = [
+# Compact smallcap fallbacks to stay light (you can expand later)
+SMALLCAP100_FALLBACK = [
     "ACE","ANGELONE","ANURAS","APLLTD","BBTC","BIRLACORPN","BLS","CAMS","CREDITACC","DATAPATTNS","DCXINDIA",
     "DEEPAKFERT","EIDPARRY","FINEORG","FORTIS","GNFC","HATSUN","HONAUT","INDIACEM","INGERRAND","JAMNAAUTO",
     "JKCEMENT","KAJARIACER","KEI","KPITTECH","LALPATHLAB","MAHSEAMLES","MCX","METROPOLIS","NATIONALUM","PNBHOUSING",
     "RITES","ROSSARI","SAREGAMA","SIS","SKFINDIA","SUPREMEIND","TATAINVEST","TEAMLEASE","THYROCARE","TRIVENI",
     "UJJIVANSFB","VGUARD","VOLTAMP","VTL","WELSPUNIND"
+]
+
+SMALLCAP250_FALLBACK = [
+    "AARTIIND","AFFLE","AMBER","ANANDRATHI","APLAPOLLO","ARVINDFASN","ASTERDM","ASTRAZEN","BASF","BAJAJHLDNG",
+    "BALAMINES","BEML","BECTORFOOD","BLUESTARCO","BSE","CESC","CHEMPLASTS","COFORGE","CYIENT","DATAPATTNS",
+    "DCMSHRIRAM","DEEPAKFERT","DEVYANI","EIHOTEL","ENIL","EPL","FDC","GESHIP","GLAND","GLS","GRINDWELL","HAPPSTMNDS",
+    "HATHWAY","HGS","IRCON","ISEC","JBCHEPHARM","JCHAC","JKLAKSHMI","JYOTHYLAB","KAJARIACER","KEC","KIRLOSBROS",
+    "KIRLOSIND","LAOPALA","LATENTVIEW","LEMONTREE","LUXIND","MAHLIFE","MMTC","NAZARA","NESCO","NOCIL","PAYTM",
+    "RADICO","RAILTEL","RAIN","RATEGAIN","REDINGTON","RTNINDIA","SANOFI","SAPPHIRE","SONATSOFTW","STARHEALTH",
+    "SUNCLAYLTD","SUNDRMFAST","SUNDARMFIN","SUVENPHAR","SYNGENE","TANLA","TCIEXP","TIDEWATER","TTML","UJJIVAN",
+    "VGUARD","VSTIND","WELSPUNIND","ZYDUSWELL"
 ]
 
 def _csv_to_pairs(csv_text: str):
@@ -53,8 +66,10 @@ def fetch_constituents(index_name: str):
     except Exception:
         if index_name == "Nifty Midcap 100":
             return [(s, f"{s}.NS") for s in MIDCAP_FALLBACK]
+        elif index_name == "Nifty Smallcap 100":
+            return [(s, f"{s}.NS") for s in SMALLCAP100_FALLBACK]
         else:
-            return [(s, f"{s}.NS") for s in SMALLCAP_FALLBACK]
+            return [(s, f"{s}.NS") for s in SMALLCAP250_FALLBACK]
 
 @st.cache_data(show_spinner=False)
 def batch_history(tickers, years=3):
@@ -73,14 +88,14 @@ def compute_signals(price_series: pd.Series):
         if s.size <= days: return np.nan
         return (y[-1]/y[-days]-1.0)*100.0
 
-    m21  = mom(21)     # ~1M momentum
+    m21  = mom(21)     # ~1M
     m63  = mom(63)     # ~3M
     m252 = mom(252)    # ~1Y (if available)
 
     vol21 = s.pct_change().rolling(21).std().iloc[-1]
     if np.isnan(vol21): vol21 = s.pct_change().std()
 
-    # Heuristic returns (fast) with volatility penalty
+    # Heuristic returns with vol penalty
     ret1m = np.clip(0.6*m21 + 0.4*m63 - 100*vol21, -50, 50)
     m252_eff = m252 if not np.isnan(m252) else (m63*4 if not np.isnan(m63) else 0.0)
     ret1y = np.clip(0.3*m63 + 0.7*m252_eff - 150*vol21, -80, 120)
@@ -95,7 +110,7 @@ def compute_signals(price_series: pd.Series):
                 prob1m=prob1m, prob1y=prob1y)
 
 # ---------------- UI ----------------
-index_choice = st.selectbox("Choose Index", ["Nifty Midcap 100", "Nifty Smallcap 100"])
+index_choice = st.selectbox("Choose Index", list(INDEX_URLS.keys()))
 companies = fetch_constituents(index_choice)
 if not companies:
     st.stop()
@@ -123,7 +138,7 @@ if st.button("Run (Fast)"):
             if not price_col: continue
             sig = compute_signals(data[tkr][price_col])
             if not sig: continue
-            # apply risk adjustment to returns only
+            # risk adjust returns (not prices)
             r1m = sig["ret1m"] * (1 + risk_adj/100.0)
             r1y = sig["ret1y"] * (1 + risk_adj/100.0)
             pred1m = sig["current"] * (1 + r1m/100.0)
@@ -141,7 +156,7 @@ if st.button("Run (Fast)"):
                 "Prob Up 1Y": round(sig["prob1y"], 3),
             })
     else:
-        # single symbol case
+        # Single symbol case (unlikely with limit>1)
         cols = list(data.columns)
         price_col = "Adj Close" if "Adj Close" in cols else ("Close" if "Close" in cols else None)
         if price_col and tickers:
@@ -179,14 +194,14 @@ if st.button("Run (Fast)"):
         ) / 4.0
         out["Composite Rank"] = out["Composite Rank"].rank(ascending=True, method="min").astype(int)
 
-        # Final order (as you wanted)
+        # Final order
         out = out[[
             "Company","Ticker","Current","Pred 1M","Pred 1Y",
             "Ret 1M %","Ret 1Y %","Prob Up 1M","Prob Up 1Y","Composite Rank",
             "Rank Ret 1M","Rank Ret 1Y","Rank Prob 1M","Rank Prob 1Y"
         ]].sort_values("Composite Rank").reset_index(drop=True)
 
-        # Simple text coloring only (no matplotlib needed)
+        # Simple text coloring (no matplotlib)
         def color_ret(v):
             if v > 0: return "color: green"
             if v < 0: return "color: red"
@@ -195,6 +210,11 @@ if st.button("Run (Fast)"):
         st.dataframe(styled, use_container_width=True)
 
         csv = out.to_csv(index=False).encode()
-        st.download_button("Download CSV", csv, f"{index_choice.lower().replace(' ','_')}_screener_fast.csv", "text/csv")
+        st.download_button(
+            "Download CSV",
+            csv,
+            f"{index_choice.lower().replace(' ','_')}_screener_fast.csv",
+            "text/csv"
+        )
 
-st.caption("Tip: start with ~20 tickers; increase once you confirm speed. No heavy libs, so it should open quickly.")
+st.caption("Fast startup. Choose Midcap 100 / Smallcap 100 / Smallcap 250. No heavy libs; batch Yahoo download for speed.")
