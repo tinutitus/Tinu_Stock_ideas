@@ -1,6 +1,6 @@
 # app.py
 # NSE Screener with ML (1M & 1Y) + Geo-News features (RSS + VADER)
-# Complete single-file application with robust LightGBM training & callback fallback.
+# Final single-file application with portfolio default capital = 10000
 
 import streamlit as st
 import pandas as pd
@@ -24,7 +24,7 @@ st.set_page_config(page_title="NSE Screener + ML + Geo-News", layout="wide")
 st.title("⚡ NSE Midcap / Smallcap Screener — ML (1M & 1Y) + Geo-News")
 
 # -----------------------------
-# Index constituent sources & fallbacks
+# Index constituents (URLs + fallbacks)
 # -----------------------------
 INDEX_URLS = {
     "Nifty Midcap 100":   "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
@@ -70,7 +70,6 @@ def fetch_constituents(index_name: str):
             return pairs
     except Exception:
         pass
-    # fallback
     if index_name == "Nifty Midcap 100":
         return [(s, f"{s}.NS") for s in MIDCAP_FALLBACK]
     else:
@@ -107,7 +106,7 @@ def batch_history(tickers, years=4):
     return yf.download(tickers, period=f"{years}y", auto_adjust=True, progress=False, threads=True, group_by="ticker")
 
 # -----------------------------
-# Hidden technical feature extractor (fast)
+# Hidden technical features
 # -----------------------------
 def compute_hidden_features(s: pd.Series):
     s = s.dropna().astype(float)
@@ -157,7 +156,7 @@ def compute_hidden_features(s: pd.Series):
     }
 
 # -----------------------------
-# Heuristic 1M & 1Y (used if ML disabled / fallback)
+# Heuristic fallback
 # -----------------------------
 def heuristic_ret1m_from_feats(feats):
     base_1m = 0.6 * (feats["m21"] if feats["m21"]==feats["m21"] else 0.0) + 0.4 * (feats["m63"] if feats["m63"]==feats["m63"] else 0.0)
@@ -264,12 +263,11 @@ def get_geo_news_features():
     return out
 
 # -----------------------------
-# ML dataset builder (with geo-news) - FIXED version (skips empty series safely)
+# ML dataset builder (safe)
 # -----------------------------
 @st.cache_data(ttl=86400)
 def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only_years=None):
     rows = []
-    # union of dates -> month-ends
     all_dates = sorted({d for ser in price_map.values() if ser is not None and not ser.empty for d in ser.index})
     if not all_dates:
         return pd.DataFrame(rows)
@@ -332,15 +330,9 @@ def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only
                 label_1y = np.nan
 
             row = {
-                "run_date": run_date,
-                "ticker": ticker,
-                "entry": entry,
-                "future1m": future1m,
-                "real_ret_1m": real_ret_1m,
-                "label_1m": label_1m,
-                "future1y": future1y,
-                "real_ret_1y": real_ret_1y,
-                "label_1y": label_1y,
+                "run_date": run_date, "ticker": ticker,
+                "entry": entry, "future1m": future1m, "real_ret_1m": real_ret_1m, "label_1m": label_1m,
+                "future1y": future1y, "real_ret_1y": real_ret_1y, "label_1y": label_1y,
                 **{
                     "m1": feats["m1"], "m5": feats["m5"], "m21": feats["m21"], "m63": feats["m63"],
                     "vol21": feats["vol21"], "ma_bias": feats["ma_bias"], "rsi14": feats["rsi14"],
@@ -354,17 +346,10 @@ def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only
     return pd.DataFrame(rows)
 
 # -----------------------------
-# Robust ML train & predict helpers (safe dtypes, sklearn wrapper, callback fallback)
+# Robust train_lgbm (sklearn -> raw fallback)
 # -----------------------------
 @st.cache_data(ttl=86400)
 def train_lgbm(df_train, features, num_boost_round=300):
-    """
-    Robust LightGBM training wrapper:
-    - coerces feature columns to numeric (NaN -> 0.0)
-    - uses LGBMClassifier for predict_proba
-    - handles LightGBM versions that don't accept early_stopping_rounds by using callbacks
-    - returns (model, auc) or (None, None) on failure
-    """
     try:
         missing = [c for c in features if c not in df_train.columns]
         if missing:
@@ -381,72 +366,91 @@ def train_lgbm(df_train, features, num_boost_round=300):
         Xs, ys = shuffle(X, y, random_state=42)
         X_train, X_val, y_train, y_val = train_test_split(Xs, ys, test_size=0.2, random_state=42, stratify=ys)
 
-        model = lgb.LGBMClassifier(
-            objective="binary",
-            n_estimators=num_boost_round,
-            learning_rate=0.05,
-            num_leaves=31,
-            min_child_samples=20,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42,
-            n_jobs=1,
-            verbosity=-1
-        )
-
-        # Try early_stopping_rounds; if unsupported, fall back to callback form
+        # Try sklearn LGBMClassifier path first
         try:
-            model.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                eval_metric="auc",
-                early_stopping_rounds=25,
-                verbose=False
+            model = lgb.LGBMClassifier(
+                objective="binary",
+                n_estimators=num_boost_round,
+                learning_rate=0.05,
+                num_leaves=31,
+                min_child_samples=20,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                n_jobs=1,
+                verbosity=-1
             )
-        except TypeError:
             try:
                 model.fit(
                     X_train, y_train,
                     eval_set=[(X_val, y_val)],
                     eval_metric="auc",
-                    callbacks=[lgb.early_stopping(25)],
+                    early_stopping_rounds=25,
                     verbose=False
                 )
-            except Exception as e2:
-                st.error(f"train_lgbm: failed to fit model using callbacks: {type(e2).__name__}: {e2}")
+            except TypeError:
+                # some builds reject kwargs; fall back to no-arg fit
+                try:
+                    model.fit(X_train, y_train)
+                except Exception:
+                    raise RuntimeError("sklearn-fit-failed")
+            try:
+                y_proba = model.predict_proba(X_val)[:, 1]
+                auc = roc_auc_score(y_val, y_proba) if len(np.unique(y_val)) > 1 else float("nan")
+            except Exception:
+                auc = float("nan")
+            return model, auc
+
+        except Exception:
+            # sklearn route failed - use raw lgb.train
+            try:
+                lgb_params = {
+                    "objective": "binary",
+                    "metric": "auc",
+                    "learning_rate": 0.05,
+                    "num_leaves": 31,
+                    "min_data_in_leaf": 20,
+                    "feature_fraction": 0.8,
+                    "bagging_fraction": 0.8,
+                    "verbose": -1,
+                    "seed": 42
+                }
+                dtrain = lgb.Dataset(X_train, label=y_train)
+                dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
+                callbacks = [lgb.early_stopping(stopping_rounds=25), lgb.log_evaluation(period=0)]
+                booster = lgb.train(
+                    lgb_params,
+                    dtrain,
+                    num_boost_round=num_boost_round,
+                    valid_sets=[dval],
+                    callbacks=callbacks
+                )
+                y_proba = booster.predict(X_val)
+                auc = roc_auc_score(y_val, y_proba) if len(np.unique(y_val)) > 1 else float("nan")
+                return booster, auc
+            except Exception as e_raw:
+                st.error(f"train_lgbm: failed with raw lgb.train: {type(e_raw).__name__}: {e_raw}")
                 return None, None
 
-        try:
-            y_proba = model.predict_proba(X_val)[:, 1]
-            auc = roc_auc_score(y_val, y_proba) if len(np.unique(y_val)) > 1 else float("nan")
-        except Exception:
-            auc = float("nan")
-
-        return model, auc
-
     except Exception as e:
-        st.error(f"ML training failed (train_lgbm): {type(e).__name__}: {e}")
+        st.error(f"ML training failed (train_lgbm top-level): {type(e).__name__}: {e}")
         return None, None
 
+# -----------------------------
+# Predict wrapper supporting both LGBMClassifier and Booster
+# -----------------------------
 def ml_predict_prob(model, feats_row, features):
-    """
-    Unified predict-prob wrapper for both sklearn LGBMClassifier and raw booster.
-    """
     if model is None:
         raise ValueError("ml_predict_prob: model is None")
-
     X = pd.DataFrame([feats_row])[features].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
-
     if hasattr(model, "predict_proba"):
         proba = model.predict_proba(X)[:, 1][0]
         return float(proba)
-
     if hasattr(model, "predict"):
         proba = model.predict(X)
         if isinstance(proba, np.ndarray):
             return float(proba[0])
         return float(proba)
-
     raise RuntimeError("Model does not support probability prediction")
 
 def prob_to_return_1m(p):
@@ -478,7 +482,7 @@ adj1y = vix_to_adj(vix, "1Y")
 vix_str = f"{vix:.2f}" if vix is not None else "N/A"
 st.caption(f"📉 India VIX = {vix_str} → Base Risk Adj: 1D={adj1d:+.1f}%, 1M={adj1m:+.1f}%, 1Y={adj1y:+.1f}%")
 
-# show geo-news summary and scale risk if needed
+# geo-news display & risk scaling
 geo_news = get_geo_news_features()
 st.markdown("**Geo-news (latest)**")
 c1,c2,c3,c4 = st.columns(4)
@@ -497,7 +501,7 @@ adj1y *= risk_scale
 st.caption(f"(Geo-news scaled risk by {risk_scale:.2f}; adjusted 1M adj now {adj1m:+.2f}%, 1Y adj {adj1y:+.2f}%)")
 
 # -----------------------------
-# ML dataset building & training (opt-in)
+# Build price_map and optionally train ML
 # -----------------------------
 tickers_subset = [t for _, t in companies[:limit]]
 st.info(f"Processing {len(tickers_subset)} tickers — this may take a while if ML is enabled.")
@@ -531,6 +535,11 @@ if enable_ml and price_map:
     recent_years = 3 if train_recent else None
     st.info("Building ML dataset (may take ~30-120s)...")
     df_ml = build_ml_dataset_with_news(price_map, min_history_days=90, recent_only_years=recent_years)
+    # debug info (helps when AUC is nan)
+    st.write("ML dataset shape:", df_ml.shape)
+    if not df_ml.empty:
+        st.write("label_1m counts:", df_ml["label_1m"].value_counts(dropna=True).to_dict())
+        st.write("label_1y counts (non-null):", df_ml["label_1y"].dropna().astype(int).value_counts().to_dict())
     df1m = df_ml.dropna(subset=["label_1m"] + FEATURES_1M)
     df1y = df_ml.dropna(subset=["label_1y"] + FEATURES_1Y)
     if not df1m.empty:
@@ -542,7 +551,7 @@ if enable_ml and price_map:
     st.success(f"ML training done — AUC 1M: {auc1m if auc1m is not None else 'N/A'}, AUC 1Y: {auc1y if auc1y is not None else 'N/A'}")
 
 # -----------------------------
-# Build UI rows using ML predictions (if available) or heuristics
+# Build UI rows & ranking
 # -----------------------------
 for tkr, ser in price_map.items():
     feats = compute_hidden_features(ser)
@@ -605,12 +614,13 @@ st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), us
 st.download_button("Download CSV", final.to_csv(index=False).encode(), f"{index_choice.lower().replace(' ','_')}_screener.csv", "text/csv")
 
 # -----------------------------
-# Simple Portfolio Builder (equal-weight)
+# Portfolio Builder
 # -----------------------------
 st.markdown("## 📦 Portfolio Builder (Equal-weight)")
 col1, col2, col3 = st.columns(3)
 with col1:
-    capital = st.number_input("Total capital (₹)", min_value=10000, value=1000000, step=10000)
+    # DEFAULT changed to ₹10,000, min ₹1,000, step ₹1,000
+    capital = st.number_input("Total capital (₹)", min_value=1000, value=10000, step=1000)
 with col2:
     top_n = st.slider("Number of holdings (Top N)", 3, min(5, len(final)), min(20, len(final)), step=1)
 with col3:
@@ -628,4 +638,4 @@ st.subheader(f"Top {top_n} Portfolio Plan")
 st.dataframe(pf[["Company","Ticker","Current","Weight %","Alloc ₹","Shares","Stop-loss","Take-profit"]], use_container_width=True)
 st.download_button("Download Portfolio CSV", pf.to_csv(index=False).encode(), "portfolio_plan.csv", "text/csv")
 
-st.caption("ML models are optional. If ML is enabled, the 1M & 1Y predictions are produced by LightGBM models trained on technical + geo-news features. If ML is disabled or fails, heuristics are used as fallback.")
+st.caption("ML models are optional. If ML is enabled, 1M & 1Y predictions come from LightGBM models trained on technical + geo-news features. Heuristics used as fallback.")
