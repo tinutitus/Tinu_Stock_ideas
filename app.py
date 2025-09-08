@@ -1,6 +1,6 @@
 # app.py
 # NSE Screener with ML (1M & 1Y) + Geo-News features (RSS + VADER)
-# Single-file application. Requires packages listed in the requirements.
+# Complete single-file application with robust LightGBM training wrapper.
 
 import streamlit as st
 import pandas as pd
@@ -10,7 +10,6 @@ import requests
 from io import StringIO
 from datetime import datetime
 import time
-from math import ceil
 import re
 
 # ML & NLP libs
@@ -19,6 +18,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
+from sklearn.utils import shuffle
 
 st.set_page_config(page_title="NSE Screener + ML + Geo-News", layout="wide")
 st.title("⚡ NSE Midcap / Smallcap Screener — ML (1M & 1Y) + Geo-News")
@@ -31,7 +31,6 @@ INDEX_URLS = {
     "Nifty Smallcap 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
 }
 
-# Fallback lists (compact but representative) — extend if you want
 MIDCAP_FALLBACK = [
     "ABBOTINDIA","ALKEM","ASHOKLEY","AUBANK","AUROPHARMA","BALKRISIND","BEL","BERGEPAINT","BHEL","CANFINHOME",
     "CUMMINSIND","DALBHARAT","DEEPAKNTR","FEDERALBNK","GODREJPROP","HAVELLS","HINDZINC","IDFCFIRSTB","INDHOTEL",
@@ -105,7 +104,6 @@ def vix_to_adj(vix, horizon):
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def batch_history(tickers, years=4):
-    # auto_adjust True -> Close is adjusted
     return yf.download(tickers, period=f"{years}y", auto_adjust=True, progress=False, threads=True, group_by="ticker")
 
 # -----------------------------
@@ -133,26 +131,22 @@ def compute_hidden_features(s: pd.Series):
     ma_mid = s.rolling(mid_w).mean().iloc[-1] if s.size >= mid_w else np.nan
     ma_long = s.rolling(long_w).mean().iloc[-1] if s.size >= long_w else np.nan
     ma_bias = 1.0 if (not np.isnan(ma_short) and not np.isnan(ma_mid) and ma_short > ma_mid) else -1.0
-    # RSI14
     delta = s.diff()
     up = delta.clip(lower=0).rolling(14).mean()
     down = -delta.clip(upper=0).rolling(14).mean()
     rs = up / (down + 1e-9)
     rsi14 = float((100.0 - (100.0 / (1.0 + rs))).iloc[-1]) if not rs.isna().all() else 50.0
-    # MACD conf
     ema12 = s.ewm(span=12, adjust=False).mean()
     ema26 = s.ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
     signal = macd.ewm(span=9, adjust=False).mean()
     macd_conf = float((macd.iloc[-1] - signal.iloc[-1])) if not macd.isna().all() else 0.0
-    # 52w prox
     if s.size >= 252:
         high52 = float(s[-252:].max())
         low52 = float(s[-252:].min())
         prox52 = float((cur - low52) / (high52 - low52 + 1e-9) * 100.0)
     else:
         prox52 = 50.0
-    # skew/kurt 60d
     rets = s.pct_change().dropna().tail(60)
     skew60 = float(rets.skew()) if len(rets) > 5 else 0.0
     kurt60 = float(rets.kurtosis()) if len(rets) > 5 else 0.0
@@ -360,34 +354,89 @@ def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only
     return pd.DataFrame(rows)
 
 # -----------------------------
-# ML train & predict helpers
+# Robust ML train & predict helpers (safe dtypes, sklearn wrapper)
 # -----------------------------
 @st.cache_data(ttl=86400)
 def train_lgbm(df_train, features, num_boost_round=300):
-    X = df_train[features].fillna(0.0)
-    y = df_train["label"].astype(int)
-    if len(X) < 200:
-        # too small to train reliably
+    """
+    Robust LightGBM training wrapper:
+    - coerces feature columns to numeric (NaN -> 0.0)
+    - uses LGBMClassifier for easier predict_proba handling
+    - returns (model, auc) or (None, None) on failure
+    """
+    try:
+        # check required feature columns
+        missing = [c for c in features if c not in df_train.columns]
+        if missing:
+            st.warning(f"train_lgbm: missing feature columns, skipping training. Missing: {missing}")
+            return None, None
+
+        # coerce features & label
+        X = df_train[features].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
+        y = pd.to_numeric(df_train["label"], errors="coerce").fillna(0).astype(int)
+
+        if len(X) < 200:
+            st.warning(f"Not enough rows to train (found {len(X)}). Need >=200.")
+            return None, None
+
+        Xs, ys = shuffle(X, y, random_state=42)
+        X_train, X_val, y_train, y_val = train_test_split(Xs, ys, test_size=0.2, random_state=42, stratify=ys)
+
+        model = lgb.LGBMClassifier(
+            objective="binary",
+            n_estimators=num_boost_round,
+            learning_rate=0.05,
+            num_leaves=31,
+            min_child_samples=20,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=1,
+            verbosity=-1
+        )
+
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            eval_metric="auc",
+            early_stopping_rounds=25,
+            verbose=False
+        )
+
+        try:
+            y_proba = model.predict_proba(X_val)[:, 1]
+            auc = roc_auc_score(y_val, y_proba) if len(np.unique(y_val)) > 1 else float("nan")
+        except Exception:
+            auc = float("nan")
+
+        return model, auc
+
+    except Exception as e:
+        st.error(f"ML training failed (train_lgbm): {type(e).__name__}: {e}")
         return None, None
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    dtrain = lgb.Dataset(X_train, label=y_train)
-    dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
-    params = {
-        "objective": "binary", "metric": "auc", "verbosity": -1,
-        "boosting_type": "gbdt", "learning_rate": 0.05, "num_leaves": 31,
-        "min_data_in_leaf": 20, "feature_fraction": 0.8, "bagging_fraction": 0.8, "seed": 42
-    }
-    model = lgb.train(params, dtrain, num_boost_round=num_boost_round, valid_sets=[dval], early_stopping_rounds=25, verbose_eval=False)
-    y_pred = model.predict(X_val)
-    auc = roc_auc_score(y_val, y_pred) if len(np.unique(y_val)) > 1 else float("nan")
-    return model, auc
 
 def ml_predict_prob(model, feats_row, features):
-    X = pd.DataFrame([feats_row])[features].fillna(0.0)
-    return float(model.predict(X)[0])
+    """
+    Unified predict-prob wrapper for both sklearn LGBMClassifier and raw booster.
+    """
+    if model is None:
+        raise ValueError("ml_predict_prob: model is None")
+
+    X = pd.DataFrame([feats_row])[features].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
+
+    if hasattr(model, "predict_proba"):
+        proba = model.predict_proba(X)[:, 1][0]
+        return float(proba)
+
+    if hasattr(model, "predict"):
+        proba = model.predict(X)
+        if isinstance(proba, np.ndarray):
+            return float(proba[0])
+        return float(proba)
+
+    raise RuntimeError("Model does not support probability prediction")
 
 def prob_to_return_1m(p):
-    # map probability to synthetic % return for ranking (tunable)
     return (p - 0.5) * 40.0
 
 def prob_to_return_1y(p):
@@ -425,7 +474,6 @@ c2.metric("EU sentiment", f"{geo_news['news_eu_sentiment']:+.2f}", f"vol {int(ge
 c3.metric("CN sentiment", f"{geo_news['news_cn_sentiment']:+.2f}", f"vol {int(geo_news['news_cn_volume'])}")
 c4.metric("Geo-news risk", f"{geo_news['geo_news_risk']:.2f}")
 
-# scale risk adj when geo risk is high
 risk_scale = 1.0
 if geo_news["geo_news_risk"] >= 2.5:
     risk_scale = 0.5
@@ -442,9 +490,7 @@ tickers_subset = [t for _, t in companies[:limit]]
 st.info(f"Processing {len(tickers_subset)} tickers — this may take a while if ML is enabled.")
 
 data = batch_history(tickers_subset, years=4)
-# Build features for UI runtime and optionally for ML training
 rows = []
-# For ML, we will build a price_map used to create dataset
 price_map = {}
 for tkr in tickers_subset:
     try:
@@ -454,7 +500,6 @@ for tkr in tickers_subset:
     except Exception:
         continue
 
-# Attempt to train ML models if enabled
 FEATURES_NEWS = [
     "news_us_sentiment","news_eu_sentiment","news_cn_sentiment",
     "news_us_volume","news_eu_volume","news_cn_volume",
@@ -470,11 +515,9 @@ FEATURES_1Y = CORE_FEATURES + FEATURES_NEWS
 model_1m = model_1y = None
 auc1m = auc1y = None
 if enable_ml and price_map:
-    # build dataset (recent-only optimization)
     recent_years = 3 if train_recent else None
     st.info("Building ML dataset (may take ~30-120s)...")
     df_ml = build_ml_dataset_with_news(price_map, min_history_days=90, recent_only_years=recent_years)
-    # 1M training
     df1m = df_ml.dropna(subset=["label_1m"] + FEATURES_1M)
     df1y = df_ml.dropna(subset=["label_1y"] + FEATURES_1Y)
     if not df1m.empty:
@@ -492,15 +535,13 @@ for tkr, ser in price_map.items():
     feats = compute_hidden_features(ser)
     if feats is None:
         continue
-    # Heuristic returns
     h_r1m = heuristic_ret1m_from_feats(feats)
     h_r1y = heuristic_ret1y_from_feats(feats)
-    # If ML available, predict probabilities and map to returns
     ml_r1m = ml_r1y = None
     if model_1m is not None:
         try:
             feats_now = {k: feats[k] for k in CORE_FEATURES}
-            feats_now.update(get_geo_news_features())  # add latest geo-news features
+            feats_now.update(get_geo_news_features())
             p1m = ml_predict_prob(model_1m, feats_now, FEATURES_1M)
             ml_r1m = prob_to_return_1m(p1m)
         except Exception:
@@ -514,11 +555,9 @@ for tkr, ser in price_map.items():
         except Exception:
             ml_r1y = None
 
-    # choose final returns: ML if available else heuristic
     final_r1m = ml_r1m if ml_r1m is not None else h_r1m
     final_r1y = ml_r1y if ml_r1y is not None else h_r1y
 
-    # Apply VIX risk adj (already scaled by geo-news)
     r1m_adj = final_r1m * (1 + adj1m / 100.0)
     r1y_adj = final_r1y * (1 + adj1y / 100.0)
 
