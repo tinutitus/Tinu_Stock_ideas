@@ -629,9 +629,12 @@ st.info("Fetching macro time series...")
 macro_map_timeseries = fetch_macro_timeseries(MACRO_TICKERS, period_years=macro_period_years)
 
 # ----- Show a small macro snapshot in header -----
+# --- Fix: compute both adj1m and adj1y so NameError doesn't occur ---
 vix = fetch_vix()
 adj1m = vix_to_adj(vix, "1M")
-st.caption(f"India VIX = {vix if vix else 'N/A'} → Risk Adj(1M) {adj1m:+.2f}%")
+adj1y = vix_to_adj(vix, "1Y")   # <-- was missing previously
+
+st.caption(f"India VIX = {vix if vix else 'N/A'} → Risk Adj: 1M {adj1m:+.2f}%, 1Y {adj1y:+.2f}%")
 
 try:
     # show small table of last macro pct30 and vol
