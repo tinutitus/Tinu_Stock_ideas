@@ -181,7 +181,6 @@ def get_geo_news_features():
             else:
                 out[f"news_{region}_avg_{key}"] = float(np.mean([s["compound"] for s in sel]))
                 out[f"news_{region}_vol_{key}"] = len(sel)
-            # topics
             topic_counts = {t:0 for t in TOPIC_KEYWORDS.keys()}
             for s in sel:
                 txt = s["text"]
@@ -444,7 +443,22 @@ index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
 companies = fetch_constituents(index_choice)
 if not companies:
     st.sidebar.error("No constituents available"); st.stop()
-limit = st.sidebar.slider("Tickers to process", 10, len(companies), min(50, len(companies)), step=5)
+
+# ---- Safe slider logic to avoid Streamlit range error ----
+n_companies = len(companies)
+min_tickers = 1 if n_companies < 10 else 10
+max_tickers = max(1, n_companies)
+default_tickers = min(max(50, min_tickers), max_tickers)
+step = 1 if max_tickers <= 20 else 5
+
+limit = st.sidebar.slider(
+    "Tickers to process",
+    min_value=min_tickers,
+    max_value=max_tickers,
+    value=default_tickers,
+    step=step
+)
+
 enable_ml = st.sidebar.checkbox("Enable ML (train & use)", value=False)
 train_recent = st.sidebar.checkbox("Train on recent N years (faster)", value=True)
 fund_csv_url = st.sidebar.text_input("Optional fundamentals CSV URL (public raw CSV)", value="")
@@ -539,8 +553,10 @@ if enable_ml and price_map:
     df_ml = build_ml_dataset_with_news_and_fundamentals(price_map, fundamentals_df=fund_df, min_history_days=90, recent_only_years=recent_years)
     st.write("ML dataset shape:", df_ml.shape)
     if not df_ml.empty:
-        st.write("label_1m counts:", df_ml["label_1m"].value_counts(dropna=True).to_dict())
-        st.write("label_1y counts:", df_ml["label_1y"].dropna().astype(int).value_counts().to_dict())
+        if "label_1m" in df_ml.columns:
+            st.write("label_1m counts:", df_ml["label_1m"].value_counts(dropna=True).to_dict())
+        if "label_1y" in df_ml.columns:
+            st.write("label_1y counts:", df_ml["label_1y"].dropna().astype(int).value_counts().to_dict())
     df1m = df_ml.dropna(subset=["label_1m"] + FEATURES_1M) if not df_ml.empty else pd.DataFrame()
     df1y = df_ml.dropna(subset=["label_1y"] + FEATURES_1Y) if not df_ml.empty else pd.DataFrame()
     if not df1m.empty:
@@ -619,7 +635,7 @@ def color_ret(v):
     return ""
 st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), use_container_width=True)
 
-# ---------------- Append to predictions log and compute ranks
+# ---------------- Append to predictions log and compute ranks per run_date
 ensure_log_exists()
 existing = read_pred_log()
 new_entries = pd.DataFrame(log_rows)
