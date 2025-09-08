@@ -1,6 +1,6 @@
 # app.py
 # NSE Screener with ML (1M & 1Y) + Geo-News features (RSS + VADER)
-# Complete single-file application with robust LightGBM training wrapper.
+# Complete single-file application with robust LightGBM training & callback fallback.
 
 import streamlit as st
 import pandas as pd
@@ -354,24 +354,23 @@ def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only
     return pd.DataFrame(rows)
 
 # -----------------------------
-# Robust ML train & predict helpers (safe dtypes, sklearn wrapper)
+# Robust ML train & predict helpers (safe dtypes, sklearn wrapper, callback fallback)
 # -----------------------------
 @st.cache_data(ttl=86400)
 def train_lgbm(df_train, features, num_boost_round=300):
     """
     Robust LightGBM training wrapper:
     - coerces feature columns to numeric (NaN -> 0.0)
-    - uses LGBMClassifier for easier predict_proba handling
+    - uses LGBMClassifier for predict_proba
+    - handles LightGBM versions that don't accept early_stopping_rounds by using callbacks
     - returns (model, auc) or (None, None) on failure
     """
     try:
-        # check required feature columns
         missing = [c for c in features if c not in df_train.columns]
         if missing:
             st.warning(f"train_lgbm: missing feature columns, skipping training. Missing: {missing}")
             return None, None
 
-        # coerce features & label
         X = df_train[features].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype(float)
         y = pd.to_numeric(df_train["label"], errors="coerce").fillna(0).astype(int)
 
@@ -395,13 +394,27 @@ def train_lgbm(df_train, features, num_boost_round=300):
             verbosity=-1
         )
 
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            eval_metric="auc",
-            early_stopping_rounds=25,
-            verbose=False
-        )
+        # Try early_stopping_rounds; if unsupported, fall back to callback form
+        try:
+            model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                eval_metric="auc",
+                early_stopping_rounds=25,
+                verbose=False
+            )
+        except TypeError:
+            try:
+                model.fit(
+                    X_train, y_train,
+                    eval_set=[(X_val, y_val)],
+                    eval_metric="auc",
+                    callbacks=[lgb.early_stopping(25)],
+                    verbose=False
+                )
+            except Exception as e2:
+                st.error(f"train_lgbm: failed to fit model using callbacks: {type(e2).__name__}: {e2}")
+                return None, None
 
         try:
             y_proba = model.predict_proba(X_val)[:, 1]
