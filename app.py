@@ -1,6 +1,6 @@
 # app.py
 # NSE Screener with ML (1M & 1Y) + Geo-News features (RSS + VADER)
-# Drop-in file. Keep requirements.txt updated as provided.
+# Single-file application. Requires packages listed in the requirements.
 
 import streamlit as st
 import pandas as pd
@@ -11,9 +11,10 @@ from io import StringIO
 from datetime import datetime
 import time
 from math import ceil
+import re
 
 # ML & NLP libs
-import feedparser, re
+import feedparser
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
@@ -269,13 +270,13 @@ def get_geo_news_features():
     return out
 
 # -----------------------------
-# ML dataset builder (with geo-news)
+# ML dataset builder (with geo-news) - FIXED version (skips empty series safely)
 # -----------------------------
 @st.cache_data(ttl=86400)
 def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only_years=None):
     rows = []
     # union of dates -> month-ends
-    all_dates = sorted({d for ser in price_map.values() for d in ser.index})
+    all_dates = sorted({d for ser in price_map.values() if ser is not None and not ser.empty for d in ser.index})
     if not all_dates:
         return pd.DataFrame(rows)
     all_dates = pd.DatetimeIndex(all_dates)
@@ -286,56 +287,77 @@ def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only
         if len(d):
             run_dates.append(d.max())
     run_dates = sorted(run_dates)
+
     HOLD_1M = 21
     HOLD_1Y = 252
+
     for run_date in run_dates:
         if recent_only_years:
             if (datetime.today().year - run_date.year) > recent_only_years:
                 continue
+
         geo_news = get_geo_news_features()
+
         for ticker, ser in price_map.items():
-            if run_date < ser.index[0]:
+            if ser is None or ser.empty:
                 continue
+            if run_date < ser.index.min():
+                continue
+
             ser_up = ser[:run_date]
             if len(ser_up) < min_history_days:
                 continue
+
             feats = compute_hidden_features(ser_up)
             if feats is None:
                 continue
+
             idx = ser.index.searchsorted(run_date)
             if idx == len(ser) or ser.index[idx] != run_date:
                 if idx == 0:
                     continue
                 idx = idx - 1
+
             fut1m = idx + HOLD_1M
             fut1y = idx + HOLD_1Y
             if fut1m >= len(ser):
                 continue
+
             entry = float(ser.iloc[idx])
             future1m = float(ser.iloc[fut1m])
             real_ret_1m = (future1m / entry - 1.0) * 100.0
             label_1m = 1 if real_ret_1m > 0 else 0
+
             if fut1y < len(ser):
                 future1y = float(ser.iloc[fut1y])
                 real_ret_1y = (future1y / entry - 1.0) * 100.0
                 label_1y = 1 if real_ret_1y > 0 else 0
             else:
-                future1y = np.nan; real_ret_1y = np.nan; label_1y = np.nan
+                future1y = np.nan
+                real_ret_1y = np.nan
+                label_1y = np.nan
+
             row = {
-                "run_date": run_date, "ticker": ticker,
-                "entry": entry, "future1m": future1m, "real_ret_1m": real_ret_1m, "label_1m": label_1m,
-                "future1y": future1y, "real_ret_1y": real_ret_1y, "label_1y": label_1y
+                "run_date": run_date,
+                "ticker": ticker,
+                "entry": entry,
+                "future1m": future1m,
+                "real_ret_1m": real_ret_1m,
+                "label_1m": label_1m,
+                "future1y": future1y,
+                "real_ret_1y": real_ret_1y,
+                "label_1y": label_1y,
+                **{
+                    "m1": feats["m1"], "m5": feats["m5"], "m21": feats["m21"], "m63": feats["m63"],
+                    "vol21": feats["vol21"], "ma_bias": feats["ma_bias"], "rsi14": feats["rsi14"],
+                    "macd_conf": feats["macd_conf"], "prox52": feats["prox52"],
+                    "skew60": feats["skew60"], "kurt60": feats["kurt60"]
+                },
+                **geo_news
             }
-            row.update({
-                "m1": feats["m1"], "m5": feats["m5"], "m21": feats["m21"], "m63": feats["m63"],
-                "vol21": feats["vol21"], "ma_bias": feats["ma_bias"], "rsi14": feats["rsi14"],
-                "macd_conf": feats["macd_conf"], "prox52": feats["prox52"],
-                "skew60": feats["skew60"], "kurt60": feats["kurt60"]
-            })
-            row.update(geo_news)
             rows.append(row)
-    df = pd.DataFrame(rows)
-    return df
+
+    return pd.DataFrame(rows)
 
 # -----------------------------
 # ML train & predict helpers
@@ -474,6 +496,7 @@ for tkr, ser in price_map.items():
     h_r1m = heuristic_ret1m_from_feats(feats)
     h_r1y = heuristic_ret1y_from_feats(feats)
     # If ML available, predict probabilities and map to returns
+    ml_r1m = ml_r1y = None
     if model_1m is not None:
         try:
             feats_now = {k: feats[k] for k in CORE_FEATURES}
@@ -482,8 +505,6 @@ for tkr, ser in price_map.items():
             ml_r1m = prob_to_return_1m(p1m)
         except Exception:
             ml_r1m = None
-    else:
-        ml_r1m = None
     if model_1y is not None:
         try:
             feats_now = {k: feats[k] for k in CORE_FEATURES}
@@ -492,8 +513,6 @@ for tkr, ser in price_map.items():
             ml_r1y = prob_to_return_1y(p1y)
         except Exception:
             ml_r1y = None
-    else:
-        ml_r1y = None
 
     # choose final returns: ML if available else heuristic
     final_r1m = ml_r1m if ml_r1m is not None else h_r1m
