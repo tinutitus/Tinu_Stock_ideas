@@ -1,6 +1,6 @@
 # app.py
-# NSE Screener with ML (1M & 1Y) + Geo-News features (RSS + VADER)
-# Final single-file application with portfolio default capital = 10000
+# NSE Screener with ML (1M & 1Y) + Geo-News (rolling) + Fundamentals ingestion (CSV)
+# Phase-1 features: fundamentals ingestion + rolling news features integrated into ML.
 
 import streamlit as st
 import pandas as pd
@@ -8,7 +8,7 @@ import numpy as np
 import yfinance as yf
 import requests
 from io import StringIO
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import re
 
@@ -20,11 +20,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from sklearn.utils import shuffle
 
-st.set_page_config(page_title="NSE Screener + ML + Geo-News", layout="wide")
-st.title("⚡ NSE Midcap / Smallcap Screener — ML (1M & 1Y) + Geo-News")
+st.set_page_config(page_title="NSE Screener + ML + Geo-News + Fundamentals", layout="wide")
+st.title("⚡ NSE Midcap / Smallcap Screener — Phase 1 (Fundamentals + Rolling News)")
 
 # -----------------------------
-# Index constituents (URLs + fallbacks)
+# Index constituent sources & fallbacks
 # -----------------------------
 INDEX_URLS = {
     "Nifty Midcap 100":   "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
@@ -53,8 +53,14 @@ SMALLCAP250_FALLBACK = [
 def _csv_to_pairs(csv_text: str):
     try:
         df = pd.read_csv(StringIO(csv_text))
-        names = df["Company Name"].astype(str).str.strip().tolist()
-        tks = df["Symbol"].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
+        # try multiple column name variants
+        if "Company Name" in df.columns and "Symbol" in df.columns:
+            names = df["Company Name"].astype(str).str.strip().tolist()
+            tks = df["Symbol"].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
+            return list(zip(names, tks))
+        # fallback: try first two columns
+        names = df.iloc[:,0].astype(str).str.strip().tolist()
+        tks = df.iloc[:,1].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
         return list(zip(names, tks))
     except Exception:
         return []
@@ -70,10 +76,55 @@ def fetch_constituents(index_name: str):
             return pairs
     except Exception:
         pass
+    # fallback
     if index_name == "Nifty Midcap 100":
         return [(s, f"{s}.NS") for s in MIDCAP_FALLBACK]
     else:
         return [(s, f"{s}.NS") for s in SMALLCAP250_FALLBACK]
+
+# -----------------------------
+# Fundamentals ingestion (Phase 1)
+# -----------------------------
+@st.cache_data(ttl=3600)
+def fetch_fundamentals_csv(url: str):
+    """
+    Fetch fundamentals CSV from a public URL. Expected columns: Ticker or Symbol (with or without .NS),
+    and numeric columns like MarketCap, PE, EPS, Revenue, Revenue_QoQ, EPS_QoQ, Sector etc.
+    Returns a cleaned DataFrame keyed by normalized ticker like 'RELIANCE' or 'RELIANCE.NS'.
+    """
+    try:
+        r = requests.get(url, timeout=8)
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+        if df.empty:
+            return None
+        # Normalize column names
+        df.columns = [c.strip() for c in df.columns]
+        # find ticker column
+        ticker_col = None
+        for cand in ["Ticker","ticker","Symbol","symbol","SYM","sym"]:
+            if cand in df.columns:
+                ticker_col = cand
+                break
+        if ticker_col is None:
+            # assume first column
+            ticker_col = df.columns[0]
+        df = df.rename(columns={ticker_col: "Ticker"})
+        df["Ticker"] = df["Ticker"].astype(str).str.strip().str.upper().apply(lambda s: s if s.endswith(".NS") else s + ".NS")
+        # Coerce numeric columns
+        for col in df.columns:
+            if col == "Ticker": continue
+            # try convert to numeric where possible
+            try:
+                df[col] = pd.to_numeric(df[col].astype(str).str.replace(",","").str.replace("%",""), errors="coerce")
+            except Exception:
+                # leave as-is (maybe sector text)
+                pass
+        df = df.set_index("Ticker")
+        return df
+    except Exception as e:
+        st.warning(f"Failed to fetch fundamentals CSV: {e}")
+        return None
 
 # -----------------------------
 # VIX & risk mapping
@@ -103,10 +154,11 @@ def vix_to_adj(vix, horizon):
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def batch_history(tickers, years=4):
+    # use yfinance; returns grouped by ticker
     return yf.download(tickers, period=f"{years}y", auto_adjust=True, progress=False, threads=True, group_by="ticker")
 
 # -----------------------------
-# Hidden technical features
+# Hidden technical feature extractor (fast)
 # -----------------------------
 def compute_hidden_features(s: pd.Series):
     s = s.dropna().astype(float)
@@ -178,7 +230,7 @@ def heuristic_ret1y_from_feats(feats):
     return ret1y
 
 # -----------------------------
-# Geo-news prototype (RSS + VADER)
+# Geo-news prototype (RSS + VADER) — now rolling 3d/7d/30d
 # -----------------------------
 analyzer = SentimentIntensityAnalyzer()
 RSS_FEEDS = {
@@ -207,67 +259,92 @@ TOPIC_KEYWORDS = {
 def _clean_text(t: str) -> str:
     return re.sub(r'\s+', ' ', (t or "").strip().lower())
 
-def _fetch_feed_items(url: str, max_items=12):
+def _fetch_feed_items_with_date(url: str, max_items=30):
+    """
+    Returns list of dicts {title, summary, published (datetime or None), compound}
+    """
+    out = []
     try:
         f = feedparser.parse(url)
         entries = f.entries[:max_items]
-        items = []
         for e in entries:
             title = getattr(e, "title", "") or ""
             summary = getattr(e, "summary", "") or ""
-            items.append({"title": _clean_text(title), "summary": _clean_text(summary)})
+            # try published_parsed
+            pub = None
+            if hasattr(e, "published_parsed") and e.published_parsed:
+                try:
+                    pub = datetime(*e.published_parsed[:6])
+                except Exception:
+                    pub = None
+            elif hasattr(e, "updated_parsed") and e.updated_parsed:
+                try:
+                    pub = datetime(*e.updated_parsed[:6])
+                except Exception:
+                    pub = None
+            text = _clean_text(title + " " + summary)
+            score = analyzer.polarity_scores(text)["compound"] if text else 0.0
+            out.append({"title": _clean_text(title), "summary": _clean_text(summary), "published": pub, "compound": score, "text": text})
         time.sleep(0.05)
-        return items
     except Exception:
-        return []
+        pass
+    return out
 
-def _analyze_headlines(items):
-    if not items:
-        return {"avg_compound": 0.0, "count": 0, "topic_counts": {}}
-    scores = []
-    from collections import Counter
-    topic_counter = Counter()
-    for it in items:
-        text = (it["title"] + " " + it["summary"]).strip()
-        if not text: continue
-        vs = analyzer.polarity_scores(text)
-        scores.append(vs["compound"])
-        for topic, kws in TOPIC_KEYWORDS.items():
-            for kw in kws:
-                if kw in text:
-                    topic_counter[topic] += 1
-                    break
-    avg_compound = float(sum(scores)/len(scores)) if scores else 0.0
-    return {"avg_compound": avg_compound, "count": len(items), "topic_counts": dict(topic_counter)}
-
-@st.cache_data(ttl=60*60)
-def get_geo_news_features():
+@st.cache_data(ttl=60*10)
+def get_geo_news_features(lookback_days=30):
+    """
+    Returns rolling sentiment aggregates for 3d/7d/30d and topic rates per region.
+    Output keys:
+      news_{region}_avg_3d, news_{region}_avg_7d, news_{region}_avg_30d
+      news_{region}_vol_3d, ...
+      news_{region}_topic_{topic}_3d, _7d, _30d (fractions)
+    Also geo_news_risk computed from neg sentiment weighted by volume.
+    """
+    now = datetime.utcnow()
     out = {}
     for region in ["us","eu","cn"]:
         feeds = RSS_FEEDS.get(region, [])
         items = []
         for url in feeds:
-            items.extend(_fetch_feed_items(url, max_items=12))
-        stats = _analyze_headlines(items)
-        out[f"news_{region}_sentiment"] = stats["avg_compound"]
-        out[f"news_{region}_volume"] = stats["count"]
-        for topic in TOPIC_KEYWORDS.keys():
-            key = f"news_{region}_topic_{topic}"
-            out[key] = stats["topic_counts"].get(topic, 0) / max(1, stats["count"])
+            items.extend(_fetch_feed_items_with_date(url, max_items=60))
+        # bins
+        bins = {"3d": now - timedelta(days=3), "7d": now - timedelta(days=7), "30d": now - timedelta(days=30)}
+        for key, cutoff in bins.items():
+            sel = [itm for itm in items if (itm["published"] is None or itm["published"] >= cutoff)]
+            if not sel:
+                out[f"news_{region}_avg_{key}"] = 0.0
+                out[f"news_{region}_vol_{key}"] = 0
+            else:
+                out[f"news_{region}_avg_{key}"] = float(np.mean([s["compound"] for s in sel]))
+                out[f"news_{region}_vol_{key}"] = len(sel)
+            # topic rates
+            topic_counts = {t:0 for t in TOPIC_KEYWORDS.keys()}
+            for s in sel:
+                txt = s["text"]
+                for t, kws in TOPIC_KEYWORDS.items():
+                    for kw in kws:
+                        if kw in txt:
+                            topic_counts[t] += 1
+                            break
+            total = max(1, len(sel))
+            for t in TOPIC_KEYWORDS.keys():
+                out[f"news_{region}_topic_{t}_{key}"] = topic_counts[t] / total
+    # overall geo-news risk: negative sentiment magnitude weighted by 7d volume
     neg_sum = 0.0
     for r in ["us","eu","cn"]:
-        s = out.get(f"news_{r}_sentiment", 0.0)
-        v = out.get(f"news_{r}_volume", 0)
-        neg_sum += max(0, -s) * (1 + v/20.0)
+        neg = min(0, out.get(f"news_{r}_avg_7d", 0.0))
+        vol = out.get(f"news_{r}_vol_7d", 0)
+        neg_sum += max(0, -neg) * (1 + vol/20.0)
     out["geo_news_risk"] = float(min(5.0, neg_sum))
     return out
 
 # -----------------------------
-# ML dataset builder (safe)
+# ML dataset builder (integrates fundamentals and rolling news)
 # -----------------------------
 @st.cache_data(ttl=86400)
-def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only_years=None):
+def build_ml_dataset_with_news_and_fundamentals(price_map: dict, fundamentals_df: pd.DataFrame=None, min_history_days=90, recent_only_years=None):
     rows = []
+    # union of dates -> month-ends
     all_dates = sorted({d for ser in price_map.values() if ser is not None and not ser.empty for d in ser.index})
     if not all_dates:
         return pd.DataFrame(rows)
@@ -288,6 +365,9 @@ def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only
             if (datetime.today().year - run_date.year) > recent_only_years:
                 continue
 
+        # fetch rolling news snapshot as-of run_date by calling the news function (which uses now)
+        # note: for simplicity we use latest news snapshot (real-time). For more precise historical alignment,
+        # we'd need to fetch news by date which is more involved. This still captures present geopolitical regime.
         geo_news = get_geo_news_features()
 
         for ticker, ser in price_map.items():
@@ -330,23 +410,59 @@ def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only
                 label_1y = np.nan
 
             row = {
-                "run_date": run_date, "ticker": ticker,
-                "entry": entry, "future1m": future1m, "real_ret_1m": real_ret_1m, "label_1m": label_1m,
-                "future1y": future1y, "real_ret_1y": real_ret_1y, "label_1y": label_1y,
+                "run_date": run_date,
+                "ticker": ticker,
+                "entry": entry,
+                "future1m": future1m,
+                "real_ret_1m": real_ret_1m,
+                "label_1m": label_1m,
+                "future1y": future1y,
+                "real_ret_1y": real_ret_1y,
+                "label_1y": label_1y,
+                # technical
                 **{
                     "m1": feats["m1"], "m5": feats["m5"], "m21": feats["m21"], "m63": feats["m63"],
                     "vol21": feats["vol21"], "ma_bias": feats["ma_bias"], "rsi14": feats["rsi14"],
                     "macd_conf": feats["macd_conf"], "prox52": feats["prox52"],
                     "skew60": feats["skew60"], "kurt60": feats["kurt60"]
                 },
+                # geo-news (include rolling 3/7/30)
                 **geo_news
             }
+
+            # fundamentals join (if available)
+            if fundamentals_df is not None:
+                frow = None
+                if ticker in fundamentals_df.index:
+                    frow = fundamentals_df.loc[ticker]
+                else:
+                    # try try without .NS
+                    t_short = ticker.replace(".NS","")
+                    alt_idx = [i for i in fundamentals_df.index if i.upper().startswith(t_short)]
+                    if alt_idx:
+                        frow = fundamentals_df.loc[alt_idx[0]]
+                if frow is not None:
+                    # attach fundamental columns, prefix 'f_'
+                    for col in fundamentals_df.columns:
+                        try:
+                            val = frow.get(col, np.nan)
+                        except Exception:
+                            try:
+                                val = frow[col]
+                            except Exception:
+                                val = np.nan
+                        row[f"f_{col}"] = float(val) if (pd.notna(val) and isinstance(val, (int,float,np.number))) else (val if isinstance(val, str) else np.nan)
+                else:
+                    # fill NaNs for known fundamentals columns
+                    for col in fundamentals_df.columns:
+                        row[f"f_{col}"] = np.nan
+
             rows.append(row)
 
     return pd.DataFrame(rows)
 
 # -----------------------------
-# Robust train_lgbm (sklearn -> raw fallback)
+# Robust ML train & predict helpers (same resilient approach)
 # -----------------------------
 @st.cache_data(ttl=86400)
 def train_lgbm(df_train, features, num_boost_round=300):
@@ -389,7 +505,6 @@ def train_lgbm(df_train, features, num_boost_round=300):
                     verbose=False
                 )
             except TypeError:
-                # some builds reject kwargs; fall back to no-arg fit
                 try:
                     model.fit(X_train, y_train)
                 except Exception:
@@ -436,9 +551,6 @@ def train_lgbm(df_train, features, num_boost_round=300):
         st.error(f"ML training failed (train_lgbm top-level): {type(e).__name__}: {e}")
         return None, None
 
-# -----------------------------
-# Predict wrapper supporting both LGBMClassifier and Booster
-# -----------------------------
 def ml_predict_prob(model, feats_row, features):
     if model is None:
         raise ValueError("ml_predict_prob: model is None")
@@ -467,6 +579,13 @@ companies = fetch_constituents(index_choice)
 if not companies:
     st.stop()
 
+st.markdown("### Phase 1 options — Fundamentals & Rolling News")
+col_u1, col_u2 = st.columns([3,1])
+with col_u1:
+    fund_csv_url = st.text_input("Optional: Public CSV URL for fundamentals (raw CSV). Example: raw GitHub CSV link", value="")
+with col_u2:
+    refresh_news = st.button("Refresh News Now")
+
 col_a, col_b, col_c = st.columns([2,1,1])
 with col_a:
     limit = st.slider("Tickers to process", 10, len(companies), min(50, len(companies)), step=5)
@@ -475,6 +594,16 @@ with col_b:
 with col_c:
     train_recent = st.checkbox("Train on recent N years (faster)", value=True)
 
+# fetch fundamentals if URL provided
+fund_df = None
+if fund_csv_url:
+    st.info("Fetching fundamentals CSV...")
+    fund_df = fetch_fundamentals_csv(fund_csv_url)
+    if fund_df is None:
+        st.warning("Could not load fundamentals; continuing without them.")
+    else:
+        st.success(f"Loaded fundamentals for {len(fund_df)} tickers. Columns: {list(fund_df.columns)[:8]}")
+
 vix = fetch_vix()
 adj1d = vix_to_adj(vix, "1D")
 adj1m = vix_to_adj(vix, "1M")
@@ -482,26 +611,27 @@ adj1y = vix_to_adj(vix, "1Y")
 vix_str = f"{vix:.2f}" if vix is not None else "N/A"
 st.caption(f"📉 India VIX = {vix_str} → Base Risk Adj: 1D={adj1d:+.1f}%, 1M={adj1m:+.1f}%, 1Y={adj1y:+.1f}%")
 
-# geo-news display & risk scaling
-geo_news = get_geo_news_features()
-st.markdown("**Geo-news (latest)**")
+# show geo-news summary and scale risk if needed
+geo_snapshot = get_geo_news_features()
+st.markdown("**Geo-news (rolling snapshot)**")
 c1,c2,c3,c4 = st.columns(4)
-c1.metric("US sentiment", f"{geo_news['news_us_sentiment']:+.2f}", f"vol {int(geo_news['news_us_volume'])}")
-c2.metric("EU sentiment", f"{geo_news['news_eu_sentiment']:+.2f}", f"vol {int(geo_news['news_eu_volume'])}")
-c3.metric("CN sentiment", f"{geo_news['news_cn_sentiment']:+.2f}", f"vol {int(geo_news['news_cn_volume'])}")
-c4.metric("Geo-news risk", f"{geo_news['geo_news_risk']:.2f}")
+c1.metric("US 7d sentiment", f"{geo_snapshot['news_us_avg_7d']:+.2f}", f"vol {int(geo_snapshot['news_us_vol_7d'])}")
+c2.metric("EU 7d sentiment", f"{geo_snapshot['news_eu_avg_7d']:+.2f}", f"vol {int(geo_snapshot['news_eu_vol_7d'])}")
+c3.metric("CN 7d sentiment", f"{geo_snapshot['news_cn_avg_7d']:+.2f}", f"vol {int(geo_snapshot['news_cn_vol_7d'])}")
+c4.metric("Geo-news risk", f"{geo_snapshot['geo_news_risk']:.2f}")
 
+# scale risk adj when geo risk is high
 risk_scale = 1.0
-if geo_news["geo_news_risk"] >= 2.5:
+if geo_snapshot["geo_news_risk"] >= 2.5:
     risk_scale = 0.5
-elif geo_news["geo_news_risk"] >= 1.5:
+elif geo_snapshot["geo_news_risk"] >= 1.5:
     risk_scale = 0.75
 adj1m *= risk_scale
 adj1y *= risk_scale
 st.caption(f"(Geo-news scaled risk by {risk_scale:.2f}; adjusted 1M adj now {adj1m:+.2f}%, 1Y adj {adj1y:+.2f}%)")
 
 # -----------------------------
-# Build price_map and optionally train ML
+# ML dataset building & training (opt-in) - use new builder
 # -----------------------------
 tickers_subset = [t for _, t in companies[:limit]]
 st.info(f"Processing {len(tickers_subset)} tickers — this may take a while if ML is enabled.")
@@ -517,31 +647,48 @@ for tkr in tickers_subset:
     except Exception:
         continue
 
-FEATURES_NEWS = [
-    "news_us_sentiment","news_eu_sentiment","news_cn_sentiment",
-    "news_us_volume","news_eu_volume","news_cn_volume",
-    "news_us_topic_oil","news_us_topic_fed_rate","news_us_topic_china_trade",
-    "news_eu_topic_oil","news_eu_topic_fed_rate","news_eu_topic_china_trade",
-    "news_cn_topic_oil","news_cn_topic_fed_rate","news_cn_topic_china_trade",
-    "geo_news_risk"
-]
+# Build ML feature lists — include rolling news keys & fundamentals prefix 'f_'
+NEWS_KEYS = []
+for r in ["us","eu","cn"]:
+    for window in ["3d","7d","30d"]:
+        NEWS_KEYS += [f"news_{r}_avg_{window}", f"news_{r}_vol_{window}"]
+    for topic in TOPIC_KEYWORDS.keys():
+        for window in ["3d","7d","30d"]:
+            NEWS_KEYS.append(f"news_{r}_topic_{topic}_{window}")
+NEWS_KEYS.append("geo_news_risk")
+
 CORE_FEATURES = ["m1","m5","m21","m63","vol21","ma_bias","rsi14","macd_conf","prox52","skew60","kurt60"]
-FEATURES_1M = CORE_FEATURES + FEATURES_NEWS
-FEATURES_1Y = CORE_FEATURES + FEATURES_NEWS
+FEATURES_1M = CORE_FEATURES + NEWS_KEYS
+FEATURES_1Y = CORE_FEATURES + NEWS_KEYS
+
+# if fundamentals present, add top-n numeric columns into features (prefix f_)
+if fund_df is not None:
+    # choose numeric columns from fund_df
+    fund_numeric_cols = [c for c in fund_df.columns if pd.api.types.is_numeric_dtype(fund_df[c])]
+    # include up to first 8 for performance
+    fund_numeric_cols = fund_numeric_cols[:8]
+    FUND_FEATS = [f"f_{c}" for c in fund_numeric_cols]
+    FEATURES_1M += FUND_FEATS
+    FEATURES_1Y += FUND_FEATS
+else:
+    FUND_FEATS = []
 
 model_1m = model_1y = None
 auc1m = auc1y = None
 if enable_ml and price_map:
     recent_years = 3 if train_recent else None
     st.info("Building ML dataset (may take ~30-120s)...")
-    df_ml = build_ml_dataset_with_news(price_map, min_history_days=90, recent_only_years=recent_years)
-    # debug info (helps when AUC is nan)
+    df_ml = build_ml_dataset_with_news_and_fundamentals(price_map, fundamentals_df=fund_df, min_history_days=90, recent_only_years=recent_years)
     st.write("ML dataset shape:", df_ml.shape)
     if not df_ml.empty:
         st.write("label_1m counts:", df_ml["label_1m"].value_counts(dropna=True).to_dict())
         st.write("label_1y counts (non-null):", df_ml["label_1y"].dropna().astype(int).value_counts().to_dict())
-    df1m = df_ml.dropna(subset=["label_1m"] + FEATURES_1M)
-    df1y = df_ml.dropna(subset=["label_1y"] + FEATURES_1Y)
+
+    # prepare training sets (require all features present for rows)
+    req1m = ["label_1m"] + FEATURES_1M
+    req1y = ["label_1y"] + FEATURES_1Y
+    df1m = df_ml.dropna(subset=req1m)
+    df1y = df_ml.dropna(subset=req1y)
     if not df1m.empty:
         df1m = df1m.rename(columns={"label_1m":"label"})
         model_1m, auc1m = train_lgbm(df1m, FEATURES_1M)
@@ -551,7 +698,7 @@ if enable_ml and price_map:
     st.success(f"ML training done — AUC 1M: {auc1m if auc1m is not None else 'N/A'}, AUC 1Y: {auc1y if auc1y is not None else 'N/A'}")
 
 # -----------------------------
-# Build UI rows & ranking
+# Build UI rows using ML predictions (if available) or heuristics
 # -----------------------------
 for tkr, ser in price_map.items():
     feats = compute_hidden_features(ser)
@@ -563,15 +710,43 @@ for tkr, ser in price_map.items():
     if model_1m is not None:
         try:
             feats_now = {k: feats[k] for k in CORE_FEATURES}
+            # attach latest geo-news rolling snapshot
             feats_now.update(get_geo_news_features())
+            # attach fundamentals for this ticker if available
+            if fund_df is not None:
+                if tkr in fund_df.index:
+                    frow = fund_df.loc[tkr]
+                else:
+                    alt = tkr.replace(".NS","")
+                    alt_idx = [i for i in fund_df.index if i.upper().startswith(alt)]
+                    frow = fund_df.loc[alt_idx[0]] if alt_idx else None
+                if frow is not None:
+                    for col in fund_numeric_cols:
+                        feats_now[f"f_{col}"] = float(frow.get(col, 0.0)) if pd.notna(frow.get(col, np.nan)) else 0.0
+                else:
+                    for col in fund_numeric_cols:
+                        feats_now[f"f_{col}"] = 0.0
             p1m = ml_predict_prob(model_1m, feats_now, FEATURES_1M)
             ml_r1m = prob_to_return_1m(p1m)
-        except Exception:
+        except Exception as e:
             ml_r1m = None
     if model_1y is not None:
         try:
             feats_now = {k: feats[k] for k in CORE_FEATURES}
             feats_now.update(get_geo_news_features())
+            if fund_df is not None:
+                if tkr in fund_df.index:
+                    frow = fund_df.loc[tkr]
+                else:
+                    alt = tkr.replace(".NS","")
+                    alt_idx = [i for i in fund_df.index if i.upper().startswith(alt)]
+                    frow = fund_df.loc[alt_idx[0]] if alt_idx else None
+                if frow is not None:
+                    for col in fund_numeric_cols:
+                        feats_now[f"f_{col}"] = float(frow.get(col, 0.0)) if pd.notna(frow.get(col, np.nan)) else 0.0
+                else:
+                    for col in fund_numeric_cols:
+                        feats_now[f"f_{col}"] = 0.0
             p1y = ml_predict_prob(model_1y, feats_now, FEATURES_1Y)
             ml_r1y = prob_to_return_1y(p1y)
         except Exception:
@@ -614,12 +789,11 @@ st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), us
 st.download_button("Download CSV", final.to_csv(index=False).encode(), f"{index_choice.lower().replace(' ','_')}_screener.csv", "text/csv")
 
 # -----------------------------
-# Portfolio Builder
+# Portfolio Builder (default 10000)
 # -----------------------------
 st.markdown("## 📦 Portfolio Builder (Equal-weight)")
 col1, col2, col3 = st.columns(3)
 with col1:
-    # DEFAULT changed to ₹10,000, min ₹1,000, step ₹1,000
     capital = st.number_input("Total capital (₹)", min_value=1000, value=10000, step=1000)
 with col2:
     top_n = st.slider("Number of holdings (Top N)", 3, min(5, len(final)), min(20, len(final)), step=1)
@@ -638,4 +812,4 @@ st.subheader(f"Top {top_n} Portfolio Plan")
 st.dataframe(pf[["Company","Ticker","Current","Weight %","Alloc ₹","Shares","Stop-loss","Take-profit"]], use_container_width=True)
 st.download_button("Download Portfolio CSV", pf.to_csv(index=False).encode(), "portfolio_plan.csv", "text/csv")
 
-st.caption("ML models are optional. If ML is enabled, 1M & 1Y predictions come from LightGBM models trained on technical + geo-news features. Heuristics used as fallback.")
+st.caption("Phase-1 features: fundamentals ingestion + rolling geo-news added. Models use these features when available. Keep ML disabled by default; enable to train and compare AUC uplift.")
