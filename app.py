@@ -1,23 +1,36 @@
 # app.py
+# NSE Screener with ML (1M & 1Y) + Geo-News features (RSS + VADER)
+# Drop-in file. Keep requirements.txt updated as provided.
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
 from io import StringIO
-from math import floor
+from datetime import datetime
+import time
+from math import ceil
 
-st.set_page_config(page_title="NSE Midcap / Smallcap Screener — Fast + Hidden 1M Improvement",
-                   layout="wide")
-st.title("⚡ NSE Midcap / Smallcap 250 Screener — Fast + Hidden 1M Accuracy Boost")
+# ML & NLP libs
+import feedparser, re
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
 
-# ---------------- Data sources ----------------
+st.set_page_config(page_title="NSE Screener + ML + Geo-News", layout="wide")
+st.title("⚡ NSE Midcap / Smallcap Screener — ML (1M & 1Y) + Geo-News")
+
+# -----------------------------
+# Index constituent sources & fallbacks
+# -----------------------------
 INDEX_URLS = {
     "Nifty Midcap 100":   "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
     "Nifty Smallcap 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
 }
 
-# Fallback lists (compact for speed/reliability)
+# Fallback lists (compact but representative) — extend if you want
 MIDCAP_FALLBACK = [
     "ABBOTINDIA","ALKEM","ASHOKLEY","AUBANK","AUROPHARMA","BALKRISIND","BEL","BERGEPAINT","BHEL","CANFINHOME",
     "CUMMINSIND","DALBHARAT","DEEPAKNTR","FEDERALBNK","GODREJPROP","HAVELLS","HINDZINC","IDFCFIRSTB","INDHOTEL",
@@ -37,22 +50,20 @@ SMALLCAP250_FALLBACK = [
     "WELSPUNIND","ZYDUSWELL"
 ]
 
-# ---------------- Helpers ----------------
 def _csv_to_pairs(csv_text: str):
-    df = pd.read_csv(StringIO(csv_text))
-    # Guard: some CSVs may vary, try common columns
-    if "Company Name" in df.columns and "Symbol" in df.columns:
+    try:
+        df = pd.read_csv(StringIO(csv_text))
         names = df["Company Name"].astype(str).str.strip().tolist()
         tks = df["Symbol"].astype(str).str.strip().apply(lambda s: f"{s}.NS").tolist()
         return list(zip(names, tks))
-    # fallback simple parse
-    return []
+    except Exception:
+        return []
 
 @st.cache_data(ttl=86400)
 def fetch_constituents(index_name: str):
     url = INDEX_URLS[index_name]
     try:
-        r = requests.get(url, timeout=5)
+        r = requests.get(url, timeout=6)
         r.raise_for_status()
         pairs = _csv_to_pairs(r.text)
         if pairs:
@@ -65,11 +76,13 @@ def fetch_constituents(index_name: str):
     else:
         return [(s, f"{s}.NS") for s in SMALLCAP250_FALLBACK]
 
+# -----------------------------
+# VIX & risk mapping
+# -----------------------------
 @st.cache_data(ttl=3600)
 def fetch_vix():
-    """Fetch latest India VIX close; None on failure."""
     try:
-        df = yf.download("^INDIAVIX", period="5d", interval="1d", progress=False)
+        df = yf.download("^INDIAVIX", period="7d", interval="1d", progress=False, auto_adjust=True)
         if df is None or df.empty:
             return None
         return float(df["Close"].iloc[-1])
@@ -77,348 +90,471 @@ def fetch_vix():
         return None
 
 def vix_to_adj(vix, horizon):
-    """Map VIX to risk adjustment (%) per horizon.
-    1D: lighter; 1M: medium; 1Y: heavier (per prior design).
-    """
     if vix is None:
         return 0.0
     if horizon == "1D":
-        return float(np.clip((15 - vix) * 0.4, -5, 5))    # light
+        return float(np.clip((15 - vix) * 0.4, -5, 5))
     elif horizon == "1M":
-        return float(np.clip((15 - vix) * 0.8, -10, 10))  # medium
+        return float(np.clip((15 - vix) * 0.8, -10, 10))
     else:
-        return float(np.clip((15 - vix) * 1.2, -20, 20))  # heavy
+        return float(np.clip((15 - vix) * 1.2, -20, 20))
 
+# -----------------------------
+# Batch price fetch (yfinance)
+# -----------------------------
 @st.cache_data(show_spinner=False)
-def batch_history(tickers, years=3):
-    """Batch download -- auto_adjust=True so Close is adjusted."""
-    return yf.download(tickers, period=f"{years}y", auto_adjust=True, progress=False,
-                       threads=True, group_by="ticker")
+def batch_history(tickers, years=4):
+    # auto_adjust True -> Close is adjusted
+    return yf.download(tickers, period=f"{years}y", auto_adjust=True, progress=False, threads=True, group_by="ticker")
 
-# ---------------- Core signal function (with HIDDEN 1M improvement) ----------------
-def compute_signals(price_series: pd.Series):
-    """
-    Returns:
-      dict(current, pred1d/pred1m/pred1y not returned directly here),
-      but we will compute ret1d, ret1m, ret1y (ret% estimates).
-    Hidden technical checks (MA / RSI) are used to nudge ret1m.
-    """
-    s = price_series.dropna()
+# -----------------------------
+# Hidden technical feature extractor (fast)
+# -----------------------------
+def compute_hidden_features(s: pd.Series):
+    s = s.dropna().astype(float)
     if s.size < 60:
         return None
-
-    # Basic momentum windows
-    def mom(arr, days):
-        if arr.size <= days:
+    cur = float(s.iloc[-1])
+    def mom(days):
+        if s.size <= days:
             return np.nan
-        return (arr[-1] / arr[-days] - 1.0) * 100.0
-
-    arr = s.values
-    current = float(arr[-1])
-    m1   = mom(arr, 1)
-    m5   = mom(arr, 5)
-    m21  = mom(arr, 21)
-    m63  = mom(arr, 63)
-    m252 = mom(arr, 252)
-
-    # volatility
-    rets = s.pct_change().dropna()
-    vol21 = rets.rolling(21).std().iloc[-1] if rets.size >= 21 else rets.std()
+        return (s.iloc[-1] / s.iloc[-days] - 1.0) * 100.0
+    m1 = mom(1); m5 = mom(5); m21 = mom(21); m63 = mom(63)
+    try:
+        m252 = mom(252)
+    except Exception:
+        m252 = np.nan
+    vol21 = s.pct_change().rolling(21).std().iloc[-1]
     if np.isnan(vol21):
-        vol21 = rets.std() if not rets.empty else 0.0
-
-    # Base heuristic returns (same structure as before)
-    base_1d = 0.7 * (m1 if not np.isnan(m1) else 0.0) + 0.3 * ((m5 if not np.isnan(m5) else 0.0) / 5.0)
-    ret1d = np.clip(base_1d - 30 * vol21, -8, 8)
-
-    base_1m = 0.6 * (m21 if not np.isnan(m21) else 0.0) + 0.4 * (m63 if not np.isnan(m63) else 0.0)
-    # hidden features computed locally (not exposed)
-    # Moving averages (short slices to be fast)
-    series = s.astype(float)
-    ma20 = series.rolling(20).mean().iloc[-1] if series.size >= 20 else np.nan
-    ma50 = series.rolling(50).mean().iloc[-1] if series.size >= 50 else np.nan
-    ma200 = series.rolling(200).mean().iloc[-1] if series.size >= 200 else np.nan
-
-    # RSI(14) - used only to dampen overbought signals
-    delta = series.diff().dropna()
+        vol21 = s.pct_change().std()
+    short_w = min(20, s.size); mid_w = min(50, s.size); long_w = min(200, s.size)
+    ma_short = s.rolling(short_w).mean().iloc[-1] if s.size >= short_w else np.nan
+    ma_mid = s.rolling(mid_w).mean().iloc[-1] if s.size >= mid_w else np.nan
+    ma_long = s.rolling(long_w).mean().iloc[-1] if s.size >= long_w else np.nan
+    ma_bias = 1.0 if (not np.isnan(ma_short) and not np.isnan(ma_mid) and ma_short > ma_mid) else -1.0
+    # RSI14
+    delta = s.diff()
     up = delta.clip(lower=0).rolling(14).mean()
     down = -delta.clip(upper=0).rolling(14).mean()
     rs = up / (down + 1e-9)
-    rsi14 = 100 - (100 / (1 + rs.iloc[-1])) if not rs.empty else 50.0
-
-    # Hidden rule adjustments to base_1m to improve 1M accuracy:
-    # - If short MA below medium MA → weaken momentum (reduce base_1m)
-    # - If RSI > 70 (overbought) → mild dampening
-    # - If RSI < 30 (oversold) → mild boost
-    adj_factor = 1.0
-    try:
-        if not np.isnan(ma20) and not np.isnan(ma50):
-            if ma20 < ma50:  # weak short-term trend
-                adj_factor *= 0.75
-            else:
-                adj_factor *= 1.05
-        # RSI adjustments
-        if rsi14 > 70:
-            adj_factor *= 0.85
-        elif rsi14 < 30:
-            adj_factor *= 1.12
-    except Exception:
-        # on any unexpected issue, keep adj_factor 1.0
-        adj_factor = 1.0
-
-    adjusted_1m = base_1m * adj_factor
-    ret1m = np.clip(adjusted_1m - 100 * vol21, -50, 50)
-
-    # 1Y return (as before), using m252 if available
-    m252_eff = m252 if not np.isnan(m252) else (m63 * 4 if not np.isnan(m63) else 0.0)
-    ret1y = np.clip(0.3 * (m63 if not np.isnan(m63) else 0.0) + 0.7 * m252_eff - 150 * vol21, -80, 120)
-
-    # Simple probability proxies (kept light)
-    prob1d = float(np.clip(0.5 + (m1 / 25.0 if not np.isnan(m1) else 0.0) - (vol21 * 1.0), 0.05, 0.95))
-    prob1m = float(np.clip(0.5 + (adjusted_1m / 100.0) - (vol21 * 1.8), 0.05, 0.95))
-    prob1y = float(np.clip(0.5 + ((m252 if not np.isnan(m252) else m63) / 300.0) - (vol21 * 1.5), 0.05, 0.95))
-
+    rsi14 = float((100.0 - (100.0 / (1.0 + rs))).iloc[-1]) if not rs.isna().all() else 50.0
+    # MACD conf
+    ema12 = s.ewm(span=12, adjust=False).mean()
+    ema26 = s.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    macd_conf = float((macd.iloc[-1] - signal.iloc[-1])) if not macd.isna().all() else 0.0
+    # 52w prox
+    if s.size >= 252:
+        high52 = float(s[-252:].max())
+        low52 = float(s[-252:].min())
+        prox52 = float((cur - low52) / (high52 - low52 + 1e-9) * 100.0)
+    else:
+        prox52 = 50.0
+    # skew/kurt 60d
+    rets = s.pct_change().dropna().tail(60)
+    skew60 = float(rets.skew()) if len(rets) > 5 else 0.0
+    kurt60 = float(rets.kurtosis()) if len(rets) > 5 else 0.0
     return {
-        "current": current,
-        "ret1d": float(ret1d),
-        "ret1m": float(ret1m),
-        "ret1y": float(ret1y),
-        "prob1d": prob1d,
-        "prob1m": prob1m,
-        "prob1y": prob1y,
-        "vol21": float(vol21),
-        # hidden technicals used only internally (not surfaced)
-        "_hidden": {"rsi14": float(rsi14) if not np.isnan(rsi14) else None,
-                    "ma20": float(ma20) if not np.isnan(ma20) else None,
-                    "ma50": float(ma50) if not np.isnan(ma50) else None}
+        "current": cur, "m1": m1, "m5": m5, "m21": m21, "m63": m63, "m252": m252,
+        "vol21": vol21, "ma_bias": ma_bias, "rsi14": rsi14, "macd_conf": macd_conf,
+        "prox52": prox52, "skew60": skew60, "kurt60": kurt60
     }
 
-# ---------------- UI ----------------
+# -----------------------------
+# Heuristic 1M & 1Y (used if ML disabled / fallback)
+# -----------------------------
+def heuristic_ret1m_from_feats(feats):
+    base_1m = 0.6 * (feats["m21"] if feats["m21"]==feats["m21"] else 0.0) + 0.4 * (feats["m63"] if feats["m63"]==feats["m63"] else 0.0)
+    adj_factor = 1.0
+    if feats["ma_bias"] < 0: adj_factor *= 0.78
+    if feats["rsi14"] > 70: adj_factor *= 0.88
+    if feats["rsi14"] < 30: adj_factor *= 1.12
+    if feats["macd_conf"] < 0: adj_factor *= 0.93
+    elif feats["macd_conf"] > 0.5: adj_factor *= 1.05
+    adj_base = base_1m * adj_factor
+    ret1m = np.clip(adj_base - 100 * feats["vol21"], -50, 50)
+    return ret1m
+
+def heuristic_ret1y_from_feats(feats):
+    m63 = feats.get("m63", 0.0)
+    m252 = feats.get("m252", np.nan)
+    m252_eff = m252 if m252==m252 else (m63*4 if m63==m63 else 0.0)
+    ret1y = np.clip(0.3*(m63 if m63==m63 else 0.0) + 0.7*m252_eff - 150*feats["vol21"], -80, 120)
+    return ret1y
+
+# -----------------------------
+# Geo-news prototype (RSS + VADER)
+# -----------------------------
+analyzer = SentimentIntensityAnalyzer()
+RSS_FEEDS = {
+    "us": [
+        "https://www.reuters.com/rssFeed/businessNews",
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    ],
+    "eu": [
+        "https://www.reuters.com/rssFeed/europeNews",
+        "https://www.ft.com/?format=rss"
+    ],
+    "cn": [
+        "https://www.reuters.com/places/china/rss",
+        "https://www.scmp.com/rss/0/feed"
+    ],
+}
+TOPIC_KEYWORDS = {
+    "oil": ["oil","opec","crude","gasoline","petroleum","energy"],
+    "fed_rate": ["fed","federal reserve","rate hike","interest rate","fed chair"],
+    "china_trade": ["china","export","tariff","trade","supply chain"],
+    "sanctions": ["sanction","sanctions"],
+    "war": ["war","invasion","conflict","attack","tension"],
+    "inflation": ["inflation","cpi","consumer price"]
+}
+
+def _clean_text(t: str) -> str:
+    return re.sub(r'\s+', ' ', (t or "").strip().lower())
+
+def _fetch_feed_items(url: str, max_items=12):
+    try:
+        f = feedparser.parse(url)
+        entries = f.entries[:max_items]
+        items = []
+        for e in entries:
+            title = getattr(e, "title", "") or ""
+            summary = getattr(e, "summary", "") or ""
+            items.append({"title": _clean_text(title), "summary": _clean_text(summary)})
+        time.sleep(0.05)
+        return items
+    except Exception:
+        return []
+
+def _analyze_headlines(items):
+    if not items:
+        return {"avg_compound": 0.0, "count": 0, "topic_counts": {}}
+    scores = []
+    from collections import Counter
+    topic_counter = Counter()
+    for it in items:
+        text = (it["title"] + " " + it["summary"]).strip()
+        if not text: continue
+        vs = analyzer.polarity_scores(text)
+        scores.append(vs["compound"])
+        for topic, kws in TOPIC_KEYWORDS.items():
+            for kw in kws:
+                if kw in text:
+                    topic_counter[topic] += 1
+                    break
+    avg_compound = float(sum(scores)/len(scores)) if scores else 0.0
+    return {"avg_compound": avg_compound, "count": len(items), "topic_counts": dict(topic_counter)}
+
+@st.cache_data(ttl=60*60)
+def get_geo_news_features():
+    out = {}
+    for region in ["us","eu","cn"]:
+        feeds = RSS_FEEDS.get(region, [])
+        items = []
+        for url in feeds:
+            items.extend(_fetch_feed_items(url, max_items=12))
+        stats = _analyze_headlines(items)
+        out[f"news_{region}_sentiment"] = stats["avg_compound"]
+        out[f"news_{region}_volume"] = stats["count"]
+        for topic in TOPIC_KEYWORDS.keys():
+            key = f"news_{region}_topic_{topic}"
+            out[key] = stats["topic_counts"].get(topic, 0) / max(1, stats["count"])
+    neg_sum = 0.0
+    for r in ["us","eu","cn"]:
+        s = out.get(f"news_{r}_sentiment", 0.0)
+        v = out.get(f"news_{r}_volume", 0)
+        neg_sum += max(0, -s) * (1 + v/20.0)
+    out["geo_news_risk"] = float(min(5.0, neg_sum))
+    return out
+
+# -----------------------------
+# ML dataset builder (with geo-news)
+# -----------------------------
+@st.cache_data(ttl=86400)
+def build_ml_dataset_with_news(price_map: dict, min_history_days=90, recent_only_years=None):
+    rows = []
+    # union of dates -> month-ends
+    all_dates = sorted({d for ser in price_map.values() for d in ser.index})
+    if not all_dates:
+        return pd.DataFrame(rows)
+    all_dates = pd.DatetimeIndex(all_dates)
+    months = sorted({(d.year, d.month) for d in all_dates})
+    run_dates = []
+    for y,m in months:
+        d = all_dates[(all_dates.year==y) & (all_dates.month==m)]
+        if len(d):
+            run_dates.append(d.max())
+    run_dates = sorted(run_dates)
+    HOLD_1M = 21
+    HOLD_1Y = 252
+    for run_date in run_dates:
+        if recent_only_years:
+            if (datetime.today().year - run_date.year) > recent_only_years:
+                continue
+        geo_news = get_geo_news_features()
+        for ticker, ser in price_map.items():
+            if run_date < ser.index[0]:
+                continue
+            ser_up = ser[:run_date]
+            if len(ser_up) < min_history_days:
+                continue
+            feats = compute_hidden_features(ser_up)
+            if feats is None:
+                continue
+            idx = ser.index.searchsorted(run_date)
+            if idx == len(ser) or ser.index[idx] != run_date:
+                if idx == 0:
+                    continue
+                idx = idx - 1
+            fut1m = idx + HOLD_1M
+            fut1y = idx + HOLD_1Y
+            if fut1m >= len(ser):
+                continue
+            entry = float(ser.iloc[idx])
+            future1m = float(ser.iloc[fut1m])
+            real_ret_1m = (future1m / entry - 1.0) * 100.0
+            label_1m = 1 if real_ret_1m > 0 else 0
+            if fut1y < len(ser):
+                future1y = float(ser.iloc[fut1y])
+                real_ret_1y = (future1y / entry - 1.0) * 100.0
+                label_1y = 1 if real_ret_1y > 0 else 0
+            else:
+                future1y = np.nan; real_ret_1y = np.nan; label_1y = np.nan
+            row = {
+                "run_date": run_date, "ticker": ticker,
+                "entry": entry, "future1m": future1m, "real_ret_1m": real_ret_1m, "label_1m": label_1m,
+                "future1y": future1y, "real_ret_1y": real_ret_1y, "label_1y": label_1y
+            }
+            row.update({
+                "m1": feats["m1"], "m5": feats["m5"], "m21": feats["m21"], "m63": feats["m63"],
+                "vol21": feats["vol21"], "ma_bias": feats["ma_bias"], "rsi14": feats["rsi14"],
+                "macd_conf": feats["macd_conf"], "prox52": feats["prox52"],
+                "skew60": feats["skew60"], "kurt60": feats["kurt60"]
+            })
+            row.update(geo_news)
+            rows.append(row)
+    df = pd.DataFrame(rows)
+    return df
+
+# -----------------------------
+# ML train & predict helpers
+# -----------------------------
+@st.cache_data(ttl=86400)
+def train_lgbm(df_train, features, num_boost_round=300):
+    X = df_train[features].fillna(0.0)
+    y = df_train["label"].astype(int)
+    if len(X) < 200:
+        # too small to train reliably
+        return None, None
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    dtrain = lgb.Dataset(X_train, label=y_train)
+    dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
+    params = {
+        "objective": "binary", "metric": "auc", "verbosity": -1,
+        "boosting_type": "gbdt", "learning_rate": 0.05, "num_leaves": 31,
+        "min_data_in_leaf": 20, "feature_fraction": 0.8, "bagging_fraction": 0.8, "seed": 42
+    }
+    model = lgb.train(params, dtrain, num_boost_round=num_boost_round, valid_sets=[dval], early_stopping_rounds=25, verbose_eval=False)
+    y_pred = model.predict(X_val)
+    auc = roc_auc_score(y_val, y_pred) if len(np.unique(y_val)) > 1 else float("nan")
+    return model, auc
+
+def ml_predict_prob(model, feats_row, features):
+    X = pd.DataFrame([feats_row])[features].fillna(0.0)
+    return float(model.predict(X)[0])
+
+def prob_to_return_1m(p):
+    # map probability to synthetic % return for ranking (tunable)
+    return (p - 0.5) * 40.0
+
+def prob_to_return_1y(p):
+    return (p - 0.5) * 200.0
+
+# -----------------------------
+# UI controls
+# -----------------------------
 index_choice = st.selectbox("Choose Index", list(INDEX_URLS.keys()))
 companies = fetch_constituents(index_choice)
 if not companies:
-    st.error("No constituents found for selected index.")
     st.stop()
 
-# Layout controls
-c1, c2, c3 = st.columns([2, 2, 1])
-with c1:
-    # allow full list length
-    limit = st.slider("Tickers to process", 5, len(companies), min(50, len(companies)), step=5)
-with c2:
-    # keep manual override slider but default to auto VIX mapping
-    vix = fetch_vix()
-    adj1d_auto = vix_to_adj(vix, "1D")
-    adj1m_auto = vix_to_adj(vix, "1M")
-    adj1y_auto = vix_to_adj(vix, "1Y")
-    vix_str = f"{vix:.2f}" if vix is not None else "N/A"
-    st.caption(f"📉 India VIX = {vix_str} → Auto Risk Adj: 1D={adj1d_auto:+.1f}%, 1M={adj1m_auto:+.1f}%, 1Y={adj1y_auto:+.1f}%")
-    # allow user to toggle auto/manual
-    risk_mode = st.selectbox("Risk adjustment mode", ["Auto (VIX)", "Manual"])
-    if risk_mode == "Manual":
-        manual_adj1d = st.slider("Manual 1D adj (%)", -20, 20, int(adj1d_auto))
-        manual_adj1m = st.slider("Manual 1M adj (%)", -20, 20, int(adj1m_auto))
-        manual_adj1y = st.slider("Manual 1Y adj (%)", -20, 20, int(adj1y_auto))
-        adj1d, adj1m, adj1y = float(manual_adj1d), float(manual_adj1m), float(manual_adj1y)
+col_a, col_b, col_c = st.columns([2,1,1])
+with col_a:
+    limit = st.slider("Tickers to process", 10, len(companies), min(50, len(companies)), step=5)
+with col_b:
+    enable_ml = st.checkbox("Enable ML (train & use)", value=False)
+with col_c:
+    train_recent = st.checkbox("Train on recent N years (faster)", value=True)
+
+vix = fetch_vix()
+adj1d = vix_to_adj(vix, "1D")
+adj1m = vix_to_adj(vix, "1M")
+adj1y = vix_to_adj(vix, "1Y")
+vix_str = f"{vix:.2f}" if vix is not None else "N/A"
+st.caption(f"📉 India VIX = {vix_str} → Base Risk Adj: 1D={adj1d:+.1f}%, 1M={adj1m:+.1f}%, 1Y={adj1y:+.1f}%")
+
+# show geo-news summary and scale risk if needed
+geo_news = get_geo_news_features()
+st.markdown("**Geo-news (latest)**")
+c1,c2,c3,c4 = st.columns(4)
+c1.metric("US sentiment", f"{geo_news['news_us_sentiment']:+.2f}", f"vol {int(geo_news['news_us_volume'])}")
+c2.metric("EU sentiment", f"{geo_news['news_eu_sentiment']:+.2f}", f"vol {int(geo_news['news_eu_volume'])}")
+c3.metric("CN sentiment", f"{geo_news['news_cn_sentiment']:+.2f}", f"vol {int(geo_news['news_cn_volume'])}")
+c4.metric("Geo-news risk", f"{geo_news['geo_news_risk']:.2f}")
+
+# scale risk adj when geo risk is high
+risk_scale = 1.0
+if geo_news["geo_news_risk"] >= 2.5:
+    risk_scale = 0.5
+elif geo_news["geo_news_risk"] >= 1.5:
+    risk_scale = 0.75
+adj1m *= risk_scale
+adj1y *= risk_scale
+st.caption(f"(Geo-news scaled risk by {risk_scale:.2f}; adjusted 1M adj now {adj1m:+.2f}%, 1Y adj {adj1y:+.2f}%)")
+
+# -----------------------------
+# ML dataset building & training (opt-in)
+# -----------------------------
+tickers_subset = [t for _, t in companies[:limit]]
+st.info(f"Processing {len(tickers_subset)} tickers — this may take a while if ML is enabled.")
+
+data = batch_history(tickers_subset, years=4)
+# Build features for UI runtime and optionally for ML training
+rows = []
+# For ML, we will build a price_map used to create dataset
+price_map = {}
+for tkr in tickers_subset:
+    try:
+        ser = data[tkr]["Close"].dropna()
+        ser.index = pd.to_datetime(ser.index)
+        price_map[tkr] = ser.sort_index()
+    except Exception:
+        continue
+
+# Attempt to train ML models if enabled
+FEATURES_NEWS = [
+    "news_us_sentiment","news_eu_sentiment","news_cn_sentiment",
+    "news_us_volume","news_eu_volume","news_cn_volume",
+    "news_us_topic_oil","news_us_topic_fed_rate","news_us_topic_china_trade",
+    "news_eu_topic_oil","news_eu_topic_fed_rate","news_eu_topic_china_trade",
+    "news_cn_topic_oil","news_cn_topic_fed_rate","news_cn_topic_china_trade",
+    "geo_news_risk"
+]
+CORE_FEATURES = ["m1","m5","m21","m63","vol21","ma_bias","rsi14","macd_conf","prox52","skew60","kurt60"]
+FEATURES_1M = CORE_FEATURES + FEATURES_NEWS
+FEATURES_1Y = CORE_FEATURES + FEATURES_NEWS
+
+model_1m = model_1y = None
+auc1m = auc1y = None
+if enable_ml and price_map:
+    # build dataset (recent-only optimization)
+    recent_years = 3 if train_recent else None
+    st.info("Building ML dataset (may take ~30-120s)...")
+    df_ml = build_ml_dataset_with_news(price_map, min_history_days=90, recent_only_years=recent_years)
+    # 1M training
+    df1m = df_ml.dropna(subset=["label_1m"] + FEATURES_1M)
+    df1y = df_ml.dropna(subset=["label_1y"] + FEATURES_1Y)
+    if not df1m.empty:
+        df1m = df1m.rename(columns={"label_1m":"label"})
+        model_1m, auc1m = train_lgbm(df1m, FEATURES_1M)
+    if not df1y.empty:
+        df1y = df1y.rename(columns={"label_1y":"label"})
+        model_1y, auc1y = train_lgbm(df1y, FEATURES_1Y)
+    st.success(f"ML training done — AUC 1M: {auc1m if auc1m is not None else 'N/A'}, AUC 1Y: {auc1y if auc1y is not None else 'N/A'}")
+
+# -----------------------------
+# Build UI rows using ML predictions (if available) or heuristics
+# -----------------------------
+for tkr, ser in price_map.items():
+    feats = compute_hidden_features(ser)
+    if feats is None:
+        continue
+    # Heuristic returns
+    h_r1m = heuristic_ret1m_from_feats(feats)
+    h_r1y = heuristic_ret1y_from_feats(feats)
+    # If ML available, predict probabilities and map to returns
+    if model_1m is not None:
+        try:
+            feats_now = {k: feats[k] for k in CORE_FEATURES}
+            feats_now.update(get_geo_news_features())  # add latest geo-news features
+            p1m = ml_predict_prob(model_1m, feats_now, FEATURES_1M)
+            ml_r1m = prob_to_return_1m(p1m)
+        except Exception:
+            ml_r1m = None
     else:
-        adj1d, adj1m, adj1y = float(adj1d_auto), float(adj1m_auto), float(adj1y_auto)
-
-with c3:
-    run_btn = st.button("Run (Fast)")
-
-# Thresholds for top picks
-thresholds = [100, 200, 300, 400, 500]
-
-# Run
-if run_btn:
-    subset = companies[:limit]
-    name_map = {tkr: name for name, tkr in subset}
-    tickers = [tkr for _, tkr in subset]
-
-    # batch download
-    data = batch_history(tickers, years=3)
-    rows = []
-    skipped = []
-
-    if isinstance(data.columns, pd.MultiIndex):
-        for tkr in tickers:
-            try:
-                df_t = data[tkr]
-            except Exception:
-                skipped.append((tkr, "no-data"))
-                continue
-
-            cols = list(df_t.columns)
-            price_col = "Close" if "Close" in cols else ("Adj Close" if "Adj Close" in cols else None)
-            if price_col is None:
-                skipped.append((tkr, "no-price-col"))
-                continue
-
-            series = df_t[price_col].dropna()
-            sig = compute_signals(series)
-            if sig is None:
-                skipped.append((tkr, "insufficient-history"))
-                continue
-
-            # apply per-horizon risk adjustments (user/VIX controlled)
-            r1d = sig["ret1d"] * (1 + adj1d / 100.0)
-            r1m = sig["ret1m"] * (1 + adj1m / 100.0)
-            r1y = sig["ret1y"] * (1 + adj1y / 100.0)
-
-            pred1d = sig["current"] * (1 + r1d / 100.0)
-            pred1m = sig["current"] * (1 + r1m / 100.0)
-            pred1y = sig["current"] * (1 + r1y / 100.0)
-
-            rows.append({
-                "Company": name_map.get(tkr, tkr.replace(".NS", "")),
-                "Ticker": tkr,
-                "Current": round(sig["current"], 2),
-                "Pred 1D": round(pred1d, 2),
-                "Pred 1M": round(pred1m, 2),
-                "Pred 1Y": round(pred1y, 2),
-                "Ret 1D %": round(r1d, 2),
-                "Ret 1M %": round(r1m, 2),
-                "Ret 1Y %": round(r1y, 2),
-                "Prob Up 1D": round(sig["prob1d"], 3),
-                "Prob Up 1M": round(sig["prob1m"], 3),
-                "Prob Up 1Y": round(sig["prob1y"], 3),
-                "Vol21": round(sig.get("vol21", 0.0), 4),
-            })
+        ml_r1m = None
+    if model_1y is not None:
+        try:
+            feats_now = {k: feats[k] for k in CORE_FEATURES}
+            feats_now.update(get_geo_news_features())
+            p1y = ml_predict_prob(model_1y, feats_now, FEATURES_1Y)
+            ml_r1y = prob_to_return_1y(p1y)
+        except Exception:
+            ml_r1y = None
     else:
-        # single symbol case (unlikely here)
-        cols = list(data.columns)
-        price_col = "Close" if "Close" in cols else ("Adj Close" if "Adj Close" in cols else None)
-        if price_col and tickers:
-            tkr = tickers[0]
-            series = data[price_col].dropna()
-            sig = compute_signals(series)
-            if sig:
-                r1d = sig["ret1d"] * (1 + adj1d / 100.0)
-                r1m = sig["ret1m"] * (1 + adj1m / 100.0)
-                r1y = sig["ret1y"] * (1 + adj1y / 100.0)
-                pred1d = sig["current"] * (1 + r1d / 100.0)
-                pred1m = sig["current"] * (1 + r1m / 100.0)
-                pred1y = sig["current"] * (1 + r1y / 100.0)
-                rows.append({
-                    "Company": name_map.get(tkr, tkr.replace(".NS", "")),
-                    "Ticker": tkr,
-                    "Current": round(sig["current"], 2),
-                    "Pred 1D": round(pred1d, 2),
-                    "Pred 1M": round(pred1m, 2),
-                    "Pred 1Y": round(pred1y, 2),
-                    "Ret 1D %": round(r1d, 2),
-                    "Ret 1M %": round(r1m, 2),
-                    "Ret 1Y %": round(r1y, 2),
-                    "Prob Up 1D": round(sig["prob1d"], 3),
-                    "Prob Up 1M": round(sig["prob1m"], 3),
-                    "Prob Up 1Y": round(sig["prob1y"], 3),
-                    "Vol21": round(sig.get("vol21", 0.0), 4),
-                })
+        ml_r1y = None
 
-    if not rows:
-        st.error("No results. Try more tickers or check network.")
-    else:
-        out = pd.DataFrame(rows)
+    # choose final returns: ML if available else heuristic
+    final_r1m = ml_r1m if ml_r1m is not None else h_r1m
+    final_r1y = ml_r1y if ml_r1y is not None else h_r1y
 
-        # compute ranks and composite rank (ascending 1 = best)
-        out["Rank Ret 1M"] = out["Ret 1M %"].rank(ascending=False, method="min").astype(int)
-        out["Rank Ret 1Y"] = out["Ret 1Y %"].rank(ascending=False, method="min").astype(int)
-        out["Rank Prob 1M"] = out["Prob Up 1M"].rank(ascending=False, method="min").astype(int)
-        out["Rank Prob 1Y"] = out["Prob Up 1Y"].rank(ascending=False, method="min").astype(int)
-        out["Composite Rank"] = (out["Rank Ret 1M"] + out["Rank Ret 1Y"] + out["Rank Prob 1M"] + out["Rank Prob 1Y"]) / 4.0
-        out["Composite Rank"] = out["Composite Rank"].rank(ascending=True, method="min").astype(int)
+    # Apply VIX risk adj (already scaled by geo-news)
+    r1m_adj = final_r1m * (1 + adj1m / 100.0)
+    r1y_adj = final_r1y * (1 + adj1y / 100.0)
 
-        final = out[[
-            "Company", "Ticker", "Current", "Pred 1D", "Pred 1M", "Pred 1Y",
-            "Ret 1D %", "Ret 1M %", "Ret 1Y %", "Prob Up 1M", "Prob Up 1Y",
-            "Vol21", "Composite Rank", "Rank Ret 1M", "Rank Ret 1Y"
-        ]].sort_values("Composite Rank").reset_index(drop=True)
+    rows.append({
+        "Company": tkr.replace(".NS",""),
+        "Ticker": tkr,
+        "Current": round(feats["current"], 2),
+        "Pred 1M": round(feats["current"] * (1 + r1m_adj/100.0), 2),
+        "Pred 1Y": round(feats["current"] * (1 + r1y_adj/100.0), 2),
+        "Ret 1M %": round(r1m_adj, 2),
+        "Ret 1Y %": round(r1y_adj, 2)
+    })
 
-        # display main table (simple color for returns)
-        def color_ret(v):
-            if v > 0: return "color: green"
-            if v < 0: return "color: red"
-            return ""
+if not rows:
+    st.error("No rows to show. Increase tickers or check data.")
+    st.stop()
 
-        st.subheader("📊 Ranked Screener (Composite Rank ascending)")
-        st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %", "Ret 1Y %"]), use_container_width=True)
+out = pd.DataFrame(rows)
+out["Rank Ret 1M"] = out["Ret 1M %"].rank(ascending=False, method="min").astype(int)
+out["Rank Ret 1Y"] = out["Ret 1Y %"].rank(ascending=False, method="min").astype(int)
+out["Composite Rank"] = ((out["Rank Ret 1M"] + out["Rank Ret 1Y"]) / 2.0).rank(ascending=True, method="min").astype(int)
+final = out[[
+    "Company","Ticker","Current","Pred 1M","Pred 1Y","Ret 1M %","Ret 1Y %","Composite Rank","Rank Ret 1M","Rank Ret 1Y"
+]].sort_values("Composite Rank").reset_index(drop=True)
 
-        csv = final.to_csv(index=False).encode()
-        st.download_button("Download CSV (Main)", csv, f"{index_choice.lower().replace(' ','_')}_screener.csv", "text/csv")
+st.subheader("📊 Ranked Screener (ML-enhanced if enabled)")
+def color_ret(v):
+    if v > 0: return "color: green"
+    if v < 0: return "color: red"
+    return ""
+st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), use_container_width=True)
+st.download_button("Download CSV", final.to_csv(index=False).encode(), f"{index_choice.lower().replace(' ','_')}_screener.csv", "text/csv")
 
-        # show skipped tickers if any
-        if skipped:
-            st.info(f"Skipped {len(skipped)} tickers (insufficient data or missing). Toggle below to view.")
-            if st.checkbox("Show skipped tickers"):
-                st.write(pd.DataFrame(skipped, columns=["Ticker", "Reason"]))
+# -----------------------------
+# Simple Portfolio Builder (equal-weight)
+# -----------------------------
+st.markdown("## 📦 Portfolio Builder (Equal-weight)")
+col1, col2, col3 = st.columns(3)
+with col1:
+    capital = st.number_input("Total capital (₹)", min_value=10000, value=1000000, step=10000)
+with col2:
+    top_n = st.slider("Number of holdings (Top N)", 3, min(5, len(final)), min(20, len(final)), step=1)
+with col3:
+    sl_pct = st.number_input("Stop-loss %", min_value=1, max_value=50, value=10)
+tp_pct = st.number_input("Take-profit %", min_value=1, max_value=200, value=25)
 
-        # -------- Top-3 under thresholds --------
-        st.markdown("### 🏆 Top 3 under ₹100 / ₹200 / ₹300 / ₹400 / ₹500 (by horizon)")
-        for thr in thresholds:
-            cheap = out[out["Current"] < thr].copy()
-            with st.expander(f"Under ₹{thr}"):
-                if cheap.empty:
-                    st.write("None")
-                else:
-                    c1, c2, c3 = st.columns(3)
-                    top1d = cheap.sort_values("Ret 1D %", ascending=False).head(3)[["Company","Ticker","Current","Pred 1D","Ret 1D %"]].reset_index(drop=True)
-                    top1m = cheap.sort_values("Ret 1M %", ascending=False).head(3)[["Company","Ticker","Current","Pred 1M","Ret 1M %"]].reset_index(drop=True)
-                    top1y = cheap.sort_values("Ret 1Y %", ascending=False).head(3)[["Company","Ticker","Current","Pred 1Y","Ret 1Y %"]].reset_index(drop=True)
-                    with c1:
-                        st.caption("Next 1 Day")
-                        st.dataframe(top1d, use_container_width=True)
-                    with c2:
-                        st.caption("Next 1 Month")
-                        st.dataframe(top1m, use_container_width=True)
-                    with c3:
-                        st.caption("Next 1 Year")
-                        st.dataframe(top1y, use_container_width=True)
+pf = final.head(top_n).copy()
+pf["Weight %"] = round(100.0 / top_n, 2)
+pf["Alloc ₹"] = (capital * (pf["Weight %"]/100.0)).round(2)
+pf["Shares"] = (pf["Alloc ₹"] / pf["Current"]).astype(int)
+pf["Stop-loss"] = (pf["Current"] * (1 - sl_pct/100.0)).round(2)
+pf["Take-profit"] = (pf["Current"] * (1 + tp_pct/100.0)).round(2)
 
-        # -------- Simple Portfolio Builder (equal-weight) --------
-        st.markdown("### 📦 Build Portfolio (from Composite Rank)")
-        with st.expander("Portfolio Builder (click to expand)"):
-            capital = st.number_input("Capital to deploy (INR)", min_value=10000, value=1000000, step=50000)
-            top_n = st.number_input("Number of holdings (Top N)", min_value=1, max_value=min(50, len(final)), value=min(20, len(final)))
-            stop_loss_pct = st.number_input("Stop-loss (%)", min_value=1, max_value=50, value=10)
-            take_profit_pct = st.number_input("Take-profit (%)", min_value=1, max_value=200, value=25)
-            build_btn = st.button("Build Portfolio")
+st.subheader(f"Top {top_n} Portfolio Plan")
+st.dataframe(pf[["Company","Ticker","Current","Weight %","Alloc ₹","Shares","Stop-loss","Take-profit"]], use_container_width=True)
+st.download_button("Download Portfolio CSV", pf.to_csv(index=False).encode(), "portfolio_plan.csv", "text/csv")
 
-            if build_btn:
-                top_df = final.head(int(top_n)).copy()
-                if top_df.empty:
-                    st.warning("No top stocks found.")
-                else:
-                    n = len(top_df)
-                    weight = 1.0 / n
-                    alloc = capital * weight
-                    shares = []
-                    allocs = []
-                    sl_prices = []
-                    tp_prices = []
-                    for i, row in top_df.iterrows():
-                        price = float(row["Current"])
-                        num_shares = int(floor(alloc / price)) if price > 0 else 0
-                        actual_alloc = num_shares * price
-                        sl_price = round(price * (1 - stop_loss_pct / 100.0), 2)
-                        tp_price = round(price * (1 + take_profit_pct / 100.0), 2)
-                        shares.append(num_shares)
-                        allocs.append(round(actual_alloc, 2))
-                        sl_prices.append(sl_price)
-                        tp_prices.append(tp_price)
-
-                    top_df["Weight %"] = round(weight * 100.0, 2)
-                    top_df["Alloc ₹"] = allocs
-                    top_df["Shares"] = shares
-                    top_df["Stop-loss"] = sl_prices
-                    top_df["Take-profit"] = tp_prices
-
-                    invested = sum(allocs)
-                    cash_left = round(capital - invested, 2)
-                    st.write(f"Invested: ₹{invested:,}    Cash left (after rounding): ₹{cash_left:,}")
-                    st.dataframe(top_df[["Company","Ticker","Current","Ret 1M %","Weight %","Alloc ₹","Shares","Stop-loss","Take-profit"]], use_container_width=True)
-
-                    # CSV download
-                    csv_port = top_df.to_csv(index=False).encode()
-                    st.download_button("Download Portfolio CSV", csv_port, f"portfolio_{index_choice.lower().replace(' ','_')}.csv", "text/csv")
-
-st.caption("This app applies a hidden, conservative improvement to 1M predictions (MA/RSI-based nudges) to boost short-term accuracy without showing technicals.")
+st.caption("ML models are optional. If ML is enabled, the 1M & 1Y predictions are produced by LightGBM models trained on technical + geo-news features. If ML is disabled or fails, heuristics are used as fallback.")
