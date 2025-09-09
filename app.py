@@ -1,5 +1,5 @@
 # app_full_updated.py
-# Concise complete NSE Screener — Phase 2
+# Clean, corrected single-file Streamlit app (concise final) with robust slider fix.
 # Run: streamlit run app_full_updated.py
 
 import streamlit as st
@@ -36,11 +36,12 @@ if HAVE_MPL:
     import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="NSE Screener", layout="wide")
-st.title("NSE Screener — Phase 2 (Concise Final)")
+st.title("NSE Screener — Phase 2 (Clean Updated)")
 
 # config
 PRED_LOG_PATH = "predictions_log.csv"
 MIN_HISTORY = 30
+NEWS_CACHE_TTL = 600
 
 INDEX_URLS = {
     "Midcap100":"https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
@@ -111,6 +112,36 @@ def fetch_vix():
     except Exception:
         return None
 
+def vix_to_adj(vix, horizon):
+    if vix is None: return 0.0
+    if horizon=="1M": return float(np.clip((15 - vix) * 0.8, -10, 10))
+    return float(np.clip((15 - vix) * 1.2, -20, 20))
+
+@st.cache_data(ttl=FUND_CSV_CACHE_TTL if 'FUND_CSV_CACHE_TTL' in globals() else 3600)
+def fetch_fundamentals_csv(url):
+    try:
+        r = requests.get(url, timeout=8); r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+        if df.empty: return None
+        df.columns = [c.strip() for c in df.columns]
+        ticker_col = None
+        for cand in ["Ticker","ticker","Symbol","symbol","SYM","sym"]:
+            if cand in df.columns:
+                ticker_col = cand; break
+        if ticker_col is None: ticker_col = df.columns[0]
+        df = df.rename(columns={ticker_col:"Ticker"})
+        df["Ticker"] = df["Ticker"].astype(str).str.strip().str.upper().apply(lambda s: s if s.endswith(".NS") else s + ".NS")
+        for col in df.columns:
+            if col=="Ticker": continue
+            try:
+                df[col] = pd.to_numeric(df[col].astype(str).str.replace(",","").str.replace("%",""), errors="coerce")
+            except Exception:
+                pass
+        df = df.set_index("Ticker")
+        return df
+    except Exception:
+        return None
+
 def compute_feats(s):
     s = s.dropna().astype(float)
     if len(s) < MIN_HISTORY: return None
@@ -125,20 +156,7 @@ def compute_feats(s):
     ma_bias = 1.0 if (not np.isnan(ma_short) and not np.isnan(ma_long) and ma_short>ma_long) else -1.0
     return {"current":cur,"m21":m21,"m63":m63,"vol21":vol21,"ma_bias":ma_bias}
 
-def heuristic_1m(feats, geo_risk=0.0):
-    base = 0.6*(feats.get("m21") or 0.0) + 0.4*(feats.get("m63") or 0.0)
-    adj = 1.0
-    if feats.get("ma_bias",1)<0: adj*=0.8
-    out = base*adj - 100*(feats.get("vol21",0.0)) - 0.8*geo_risk
-    return float(np.clip(out, -50,50))
-
-def heuristic_1y(feats, geo_risk=0.0):
-    m63 = feats.get("m63") or 0.0
-    m252 = feats.get("m252") if "m252" in feats else m63*4
-    out = 0.3*m63 + 0.7*m252 - 150*(feats.get("vol21",0.0)) - 0.8*geo_risk
-    return float(np.clip(out, -80,120))
-
-@st.cache_data(ttl=NEWS_CACHE_TTL if 'NEWS_CACHE_TTL' in globals() else 600)
+@st.cache_data(ttl=NEWS_CACHE_TTL)
 def get_geo_snapshot():
     if not ML_AVAILABLE:
         return {"geo_news_risk":0.0,"us":0.0,"eu":0.0,"cn":0.0}
@@ -170,13 +188,22 @@ st.sidebar.header("Options & Environment")
 st.sidebar.write({"feedparser":_has_feedparser,"vader":_has_vader,"lightgbm":_has_lgb,"sklearn":_has_sklearn,"matplotlib":_has_matplotlib})
 index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
 companies = fetch_constituents(index_choice)
-limit = # robust slider for number of tickers to process
+
+# robust slider for number of tickers to process
 n_companies = len(companies)
 min_tickers = 1 if n_companies < 10 else 10
-max_tickers = max(1, n_companies)
-default_t = min(max_tickers, 80)
+max_tickers = max(1, n_companies)                 # at least 1
+default_t = min(max_tickers, 80)                  # default <= max
 step = 1 if max_tickers - min_tickers <= 10 else 5
-limit = st.sidebar.slider("Tickers to process", min_value=min_tickers, max_value=max_tickers, value=default_t, step=step),100), min(80,len(companies)), step=5)
+
+limit = st.sidebar.slider(
+    "Tickers to process",
+    min_value=min_tickers,
+    max_value=max_tickers,
+    value=default_t,
+    step=step
+)
+
 enable_ml = st.sidebar.checkbox("Enable ML (train & use)", value=False)
 fund_csv = st.sidebar.text_input("Optional fundamentals CSV URL", value="")
 show_heatmap = st.sidebar.checkbox("Show heatmap", value=True)
@@ -217,11 +244,10 @@ for t in tickers:
     except Exception:
         price_map[t]=pd.Series(dtype=float)
 
-# ML dataset and training placeholder (kept minimal here)
+# ML dataset and training (minimal safe variant)
 model_1m = model_1y = None
 if enable_ml and ML_AVAILABLE:
     st.info("Building ML dataset (simple) and training (may take time)...")
-    # Build tiny dataset by sampling full-series windows (simple approach)
     rows_ml=[]
     for t,ser in price_map.items():
         if ser is None or ser.empty or len(ser)<252+60: continue
@@ -285,7 +311,7 @@ if skipped:
     st.dataframe(pd.DataFrame(skipped, columns=["Ticker","Reason"]).head(50))
 
 if not rows:
-    st.error("No predictions generated."); st.stop()
+    st.error("No predictions generated"); st.stop()
 
 df = pd.DataFrame(rows)
 df["Rank 1M"] = df["Ret 1M %"].rank(ascending=False, method="min").astype(int)
