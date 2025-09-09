@@ -1,5 +1,5 @@
 # app_full_updated.py
-# Clean, corrected single-file Streamlit app (concise final) with robust slider fix.
+# Corrected single-file Streamlit app (adds missing heuristic functions).
 # Run: streamlit run app_full_updated.py
 
 import streamlit as st
@@ -36,7 +36,7 @@ if HAVE_MPL:
     import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="NSE Screener", layout="wide")
-st.title("NSE Screener — Phase 2 (Clean Updated)")
+st.title("NSE Screener — Phase 2 (Corrected)")
 
 # config
 PRED_LOG_PATH = "predictions_log.csv"
@@ -117,7 +117,7 @@ def vix_to_adj(vix, horizon):
     if horizon=="1M": return float(np.clip((15 - vix) * 0.8, -10, 10))
     return float(np.clip((15 - vix) * 1.2, -20, 20))
 
-@st.cache_data(ttl=FUND_CSV_CACHE_TTL if 'FUND_CSV_CACHE_TTL' in globals() else 3600)
+@st.cache_data(ttl=3600)
 def fetch_fundamentals_csv(url):
     try:
         r = requests.get(url, timeout=8); r.raise_for_status()
@@ -155,6 +155,20 @@ def compute_feats(s):
     ma_long = s.rolling(50).mean().iloc[-1] if len(s)>=50 else np.nan
     ma_bias = 1.0 if (not np.isnan(ma_short) and not np.isnan(ma_long) and ma_short>ma_long) else -1.0
     return {"current":cur,"m21":m21,"m63":m63,"vol21":vol21,"ma_bias":ma_bias}
+
+# --- Add missing heuristic functions ---
+def heuristic_1m(feats, geo_risk=0.0):
+    base = 0.6*(feats.get("m21") or 0.0) + 0.4*(feats.get("m63") or 0.0)
+    adj = 1.0
+    if feats.get("ma_bias",1) < 0: adj *= 0.8
+    out = base * adj - 100 * (feats.get("vol21",0.0)) - 0.8 * geo_risk
+    return float(np.clip(out, -50, 50))
+
+def heuristic_1y(feats, geo_risk=0.0):
+    m63 = feats.get("m63") or 0.0
+    m252 = feats.get("m252") if "m252" in feats else m63 * 4.0
+    out = 0.3 * m63 + 0.7 * m252 - 150 * (feats.get("vol21",0.0)) - 0.8 * geo_risk
+    return float(np.clip(out, -80, 120))
 
 @st.cache_data(ttl=NEWS_CACHE_TTL)
 def get_geo_snapshot():
