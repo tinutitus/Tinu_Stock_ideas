@@ -1,22 +1,21 @@
-# =========================
-# NSE Screener — Phase 2
-# Combined requirements.txt
-# =========================
-
-# --- Core (always needed) ---
+# Full requirements for NSE Screener — Phase 2 (full setup)
+# Core
 streamlit>=1.34
 pandas>=2.0
 numpy>=1.24
 yfinance>=0.2
 requests>=2.31
 
-# --- Plotting (for heatmap, optional but recommended) ---
+# Plotting (heatmap)
 matplotlib>=3.7
 
-# --- Machine Learning (optional: enable ML predictions) ---
+# Machine Learning (LightGBM + sklearn)
 lightgbm>=4.0
 scikit-learn>=1.3
 
-# --- NLP & Geo-news sentiment (optional) ---
+# NLP & Geo-news sentiment
 feedparser>=6.0
 vaderSentiment>=3.3.2
+
+# Optional (helps in some environments)
+joblib>=1.2
