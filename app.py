@@ -339,4 +339,3 @@ if st.button("Export portfolio CSV"):
     st.download_button("Download CSV", csv, file_name="portfolio.csv", mime="text/csv")
 
 st.caption("Notes: Heuristic predictions are default. Enable ML and install optional packages for model-based predictions.")
-
