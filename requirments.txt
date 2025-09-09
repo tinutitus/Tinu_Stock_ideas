@@ -1,4 +1,5 @@
-# Full requirements for NSE Screener — Phase 2 (full setup)
+# Full requirements for NSE Screener — Phase 2 with ML (1M & 1Y)
+
 # Core
 streamlit>=1.34
 pandas>=2.0
