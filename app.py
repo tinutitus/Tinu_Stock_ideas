@@ -870,6 +870,129 @@ def color_ret(v):
     if v < 0: return "color: red"
     return ""
 st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), use_container_width=True)
+# ---------------- Heatmap visualization for quick signal view ----------------
+import matplotlib.pyplot as plt
+import numpy as np
+
+def show_prediction_heatmap(df_final, top_n=20, fund_df=None, fund_cols=None, figsize=(10, max(4, top_n*0.25))):
+    """
+    df_final: DataFrame (must contain columns: 'Ticker','Ret 1M %','Ret 1Y %','Composite Rank')
+    top_n: number of top rows to display (by Composite Rank)
+    fund_df: optional fundamentals DataFrame (indexed by ticker)
+    fund_cols: optional list of up to 2 fundamentals column names (strings) to include
+    """
+    # defensive copy and ensure required cols
+    df = df_final.copy()
+    if "Composite Rank" not in df.columns:
+        st.warning("Composite Rank not present — can't draw heatmap.")
+        return
+
+    # select top rows
+    df_plot = df.sort_values("Composite Rank").head(top_n).reset_index(drop=True)
+
+    # base columns to include and their display order
+    cols_to_plot = ["Ret 1M %", "Ret 1Y %", "Composite Rank"]
+    # append fundamentals if requested and available
+    fund_cols = fund_cols or []
+    fund_cols = fund_cols[:2]  # limit to 2 for space
+    valid_funds = []
+    if fund_df is not None and len(fund_cols) > 0:
+        for fc in fund_cols:
+            if fc in fund_df.columns:
+                valid_funds.append(fc)
+            else:
+                # try prefixed names (app uses f_{col} in ML dataset); handle both
+                if f"f_{fc}" in fund_df.columns:
+                    valid_funds.append(f"f_{fc}")
+    cols_to_plot += valid_funds
+
+    # build numeric matrix; normalize each column for color scaling (z-score or min-max)
+    mat = []
+    for c in cols_to_plot:
+        if c in df_plot.columns:
+            series = df_plot[c].astype(float).fillna(0.0)
+        else:
+            # try to fetch fundamentals from fund_df based on ticker
+            vals = []
+            for t in df_plot["Ticker"]:
+                val = np.nan
+                try:
+                    if fund_df is not None and t in fund_df.index:
+                        val = fund_df.loc[t].get(c, np.nan)
+                    elif fund_df is not None and t.replace(".NS","") in fund_df.index:
+                        val = fund_df.loc[t.replace(".NS","")].get(c, np.nan)
+                except Exception:
+                    val = np.nan
+                vals.append(val if not pd.isna(val) else 0.0)
+            series = pd.Series(vals)
+        mat.append(series.values.astype(float))
+    mat = np.array(mat).T  # shape (rows, cols)
+
+    # For Composite Rank we want smaller=better -> invert so higher is better for color
+    try:
+        col_idx = cols_to_plot.index("Composite Rank")
+        mat[:, col_idx] = -mat[:, col_idx]
+    except Exception:
+        pass
+
+    # Normalize columns to 0..1 for color mapping to avoid one column dominating
+    mat_norm = np.zeros_like(mat, dtype=float)
+    for j in range(mat.shape[1]):
+        col = mat[:, j]
+        if np.all(np.isfinite(col)):
+            mn = np.nanmin(col); mx = np.nanmax(col)
+            if mx - mn == 0:
+                mat_norm[:, j] = 0.5
+            else:
+                mat_norm[:, j] = (col - mn) / (mx - mn)
+        else:
+            mat_norm[:, j] = np.nan_to_num((col - np.nanmin(col)) / (np.nanmax(col) - np.nanmin(col) + 1e-9))
+
+    # Plot
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(mat_norm, aspect="auto", cmap="RdYlGn")  # green = good, red = bad
+    ax.set_yticks(np.arange(len(df_plot)))
+    # show tick labels as Company (Ticker) — keep concise
+    labels = df_plot["Company"].astype(str) + " (" + df_plot["Ticker"].astype(str).str.replace(".NS","") + ")"
+    ax.set_yticklabels(labels)
+    ax.set_xticks(np.arange(len(cols_to_plot)))
+    ax.set_xticklabels(cols_to_plot, rotation=45, ha="right")
+    ax.tick_params(axis="y", which="major", labelsize=9)
+    ax.tick_params(axis="x", which="major", labelsize=9)
+    ax.set_title(f"Top {len(df_plot)} Ranked Signals Heatmap (green=better)")
+
+    # colorbar
+    cbar = fig.colorbar(im, ax=ax, orientation="vertical", fraction=0.05, pad=0.02)
+    cbar.set_label("Normalized score (higher = better)")
+
+    # annotate each cell with the actual un-normalized value (rounded)
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            val = mat[i, j]
+            if np.isnan(val):
+                txt = "n/a"
+            else:
+                # round sensibly: 2 decimal for percentages, 0/1 for ranks
+                if "Ret" in cols_to_plot[j] or "Growth" in cols_to_plot[j] or "pct" in cols_to_plot[j].lower():
+                    txt = f"{val:.2f}"
+                else:
+                    txt = f"{val:.0f}"
+            ax.text(j, i, txt, ha="center", va="center", color="black", fontsize=7)
+
+    plt.tight_layout()
+    st.pyplot(fig)
+
+# --- Usage: show heatmap for top 20, include up to 2 fundamentals if fund_df provided ---
+if st.sidebar.checkbox("Show heatmap view", value=True):
+    # optionally let user pick number of rows and fundamental columns
+    heat_n = st.sidebar.slider("Heatmap rows (top N)", min_value=5, max_value=min(100, len(final)), value=min(20, len(final)))
+    if fund_df is not None:
+        # show candidate fundamental columns to user
+        cand = [c for c in fund_df.columns if pd.api.types.is_numeric_dtype(fund_df[c])]
+        sel_funds = st.sidebar.multiselect("Add up to 2 fundamentals to heatmap", cand, default=cand[:2])[:2]
+    else:
+        sel_funds = []
+    show_prediction_heatmap(final, top_n=heat_n, fund_df=fund_df, fund_cols=sel_funds)
 
 # ----- Append to integrated log and compute ranks per run_date -----
 ensure_log_exists()
