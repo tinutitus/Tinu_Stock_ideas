@@ -7,3 +7,4 @@ feedparser
 vaderSentiment
 lightgbm
 scikit-learn
+matplotlib
