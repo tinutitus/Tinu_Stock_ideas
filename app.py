@@ -170,7 +170,13 @@ st.sidebar.header("Options & Environment")
 st.sidebar.write({"feedparser":_has_feedparser,"vader":_has_vader,"lightgbm":_has_lgb,"sklearn":_has_sklearn,"matplotlib":_has_matplotlib})
 index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
 companies = fetch_constituents(index_choice)
-limit = st.sidebar.slider("Tickers to process", 10, min(len(companies),100), min(80,len(companies)), step=5)
+limit = # robust slider for number of tickers to process
+n_companies = len(companies)
+min_tickers = 1 if n_companies < 10 else 10
+max_tickers = max(1, n_companies)
+default_t = min(max_tickers, 80)
+step = 1 if max_tickers - min_tickers <= 10 else 5
+limit = st.sidebar.slider("Tickers to process", min_value=min_tickers, max_value=max_tickers, value=default_t, step=step),100), min(80,len(companies)), step=5)
 enable_ml = st.sidebar.checkbox("Enable ML (train & use)", value=False)
 fund_csv = st.sidebar.text_input("Optional fundamentals CSV URL", value="")
 show_heatmap = st.sidebar.checkbox("Show heatmap", value=True)
