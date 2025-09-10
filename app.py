@@ -372,7 +372,7 @@ st.title("⚡ NSE Screener — Phase1+ (ML, SectorRel, ET Picks, Actuals)")
 st.sidebar.header("Options")
 index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
 companies = fetch_constituents(index_choice)
-
+st.sidebar.write(f"Fetched {len(companies)} companies for {index_choice}")
 n_companies = len(companies) if companies else 0
 if n_companies > 0:
     min_tickers = 1 if n_companies < 10 else 10
