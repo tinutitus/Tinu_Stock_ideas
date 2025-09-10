@@ -460,19 +460,33 @@ for t in tickers_subset:
             if isinstance(price_data.columns, pd.MultiIndex) and t in price_data.columns.get_level_values(0):
                 ser = pd.Series(dtype=float)
 if isinstance(price_data.columns, pd.MultiIndex) and t in price_data.columns.get_level_values(0):
-    ser = price_data[t]["Close"].dropna()
-elif "Close" in price_data.columns:
-    ser = price_data["Close"].dropna()
-if ser.empty:
-    tmp = yf.download(t, period="1y", auto_adjust=True, progress=False)
-    if tmp is not None and "Close" in tmp.columns:
-        ser = tmp["Close"].dropna()
-            else:
-                tmp = yf.download(t, period="4y", progress=False, auto_adjust=True)
-                ser = tmp["Close"].dropna() if (tmp is not None and "Close" in tmp.columns) else pd.Series(dtype=float)
-        ser.index = pd.to_datetime(ser.index)
-        price_map[t] = ser.sort_index()
-    except Exception:
+    price_map = {}
+for t in tickers_subset:
+    try:
+        ser = pd.Series(dtype=float)
+
+        # Case 1: batch download with MultiIndex
+        if isinstance(price_data.columns, pd.MultiIndex) and t in price_data.columns.get_level_values(0):
+            ser = price_data[t]["Close"].dropna()
+
+        # Case 2: single-index download
+        elif "Close" in price_data.columns:
+            ser = price_data["Close"].dropna()
+
+        # Case 3: fallback — individual download
+        if ser.empty:
+            tmp = yf.download(t, period="1y", auto_adjust=True, progress=False)
+            if tmp is not None and "Close" in tmp.columns:
+                ser = tmp["Close"].dropna()
+
+        if not ser.empty:
+            ser.index = pd.to_datetime(ser.index)
+            price_map[t] = ser.sort_index()
+        else:
+            price_map[t] = pd.Series(dtype=float)
+
+    except Exception as e:
+        st.warning(f"⚠️ Failed to fetch data for {t}: {e}")
         price_map[t] = pd.Series(dtype=float)
 
 # ------------------------------
