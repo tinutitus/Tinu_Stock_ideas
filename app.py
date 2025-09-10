@@ -840,6 +840,20 @@ def color_ret(v):
     if v < 0: return "color: red"
     return ""
 st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), use_container_width=True)
+# ----- ETMarkets Picks Section -----
+if et_enable:
+    st.subheader("📌 ETMarkets Expert Picks")
+    
+    # Temporary placeholder (until we add scraping/API)
+    demo_data = {
+        "Company": ["HDFC Bank", "Infosys", "Tata Motors"],
+        "Ticker": ["HDFCBANK.NS", "INFY.NS", "TATAMOTORS.NS"],
+        "ET Rating": ["Buy", "Hold", "Buy"],
+        "Target Price (₹)": [1800, 1550, 700]
+    }
+    et_df = pd.DataFrame(demo_data)
+    
+    st.dataframe(et_df, use_container_width=True)
 
 # append to integrated log
 ensure_log_exists()
