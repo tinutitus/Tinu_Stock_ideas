@@ -1,12 +1,10 @@
-# requirements_phase1.txt
-streamlit>=1.32
-pandas>=2.0
-numpy>=1.24
-yfinance>=0.2
-requests>=2.31
-matplotlib>=3.7
-# Optional ML & news:
-lightgbm
-scikit-learn
+streamlit
+pandas
+numpy
+yfinance
+requests
 feedparser
 vaderSentiment
+lightgbm
+scikit-learn
+matplotlib
