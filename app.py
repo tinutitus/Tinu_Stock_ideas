@@ -372,9 +372,21 @@ st.title("⚡ NSE Screener — Phase1+ (ML, SectorRel, ET Picks, Actuals)")
 st.sidebar.header("Options")
 index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
 companies = fetch_constituents(index_choice)
-if not companies:
-    st.sidebar.error("No constituents fetched for this index (remote CSV may be unavailable). Provide a manual list or check URL.")
-limit = st.sidebar.slider("Tickers to process", 10, len(companies) if companies else 0, min(50, len(companies) if companies else 0), step=5)
+
+n_companies = len(companies) if companies else 0
+if n_companies > 0:
+    min_tickers = 1 if n_companies < 10 else 10
+    max_tickers = n_companies
+    default_tickers = min(50, n_companies)
+    step = 1 if n_companies < 50 else 5
+    limit = st.sidebar.slider("Tickers to process",
+                              min_value=min_tickers,
+                              max_value=max_tickers,
+                              value=default_tickers,
+                              step=step)
+else:
+    st.sidebar.warning("⚠️ No companies found for this index.")
+    limit = 0
 enable_ml = st.sidebar.checkbox("Enable ML training & use", value=ENABLE_ML_DEFAULT)
 train_recent = st.sidebar.checkbox("Train using recent N years only (faster)", value=True)
 fund_csv_url = st.sidebar.text_input("Optional fundamentals CSV URL (public raw CSV)", value="")
