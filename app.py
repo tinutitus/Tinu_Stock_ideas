@@ -458,7 +458,15 @@ for t in tickers_subset:
             ser = tmp["Close"].dropna() if (isinstance(tmp, pd.DataFrame) and "Close" in tmp.columns) else pd.Series(dtype=float)
         else:
             if isinstance(price_data.columns, pd.MultiIndex) and t in price_data.columns.get_level_values(0):
-                ser = price_data[t]["Close"].dropna()
+                ser = pd.Series(dtype=float)
+if isinstance(price_data.columns, pd.MultiIndex) and t in price_data.columns.get_level_values(0):
+    ser = price_data[t]["Close"].dropna()
+elif "Close" in price_data.columns:
+    ser = price_data["Close"].dropna()
+if ser.empty:
+    tmp = yf.download(t, period="1y", auto_adjust=True, progress=False)
+    if tmp is not None and "Close" in tmp.columns:
+        ser = tmp["Close"].dropna()
             else:
                 tmp = yf.download(t, period="4y", progress=False, auto_adjust=True)
                 ser = tmp["Close"].dropna() if (tmp is not None and "Close" in tmp.columns) else pd.Series(dtype=float)
