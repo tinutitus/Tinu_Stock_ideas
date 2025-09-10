@@ -627,7 +627,6 @@ else:
 # Fetch macro series
 st.info("Fetching macro time series...")
 macro_map_timeseries = fetch_macro_timeseries(MACRO_TICKERS, period_years=macro_period_years)
-
 # Ensure VIX adjustments are defined (avoid NameError)
 try:
     vix = fetch_vix()
