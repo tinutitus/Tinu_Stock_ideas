@@ -605,6 +605,25 @@ refresh_news = st.sidebar.button("Refresh News Now")
 force_actuals_refresh = st.sidebar.button("Force refresh actuals")
 # Optional: Show ETMarkets Picks
 et_enable = st.sidebar.checkbox("Show ETMarkets Picks", value=False)
+# ----- UI controls -----
+st.sidebar.header("Phase 1 Options")
+index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
+companies = fetch_constituents(index_choice)
+
+n_companies = len(companies) if companies else 0
+if n_companies > 0:
+    min_tickers = 1 if n_companies < 10 else 10
+    max_tickers = n_companies
+    default_tickers = min(50, n_companies)
+    step = 1 if n_companies < 50 else 5
+    limit = st.sidebar.slider("Tickers to process",
+                              min_value=min_tickers,
+                              max_value=max_tickers,
+                              value=default_tickers,
+                              step=step)
+else:
+    st.sidebar.warning("⚠️ No companies found for this index.")
+    limit = 0
 # Fetch macro series
 st.info("Fetching macro time series...")
 macro_map_timeseries = fetch_macro_timeseries(MACRO_TICKERS, period_years=macro_period_years)
