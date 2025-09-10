@@ -603,7 +603,8 @@ fund_csv_url = st.sidebar.text_input("Optional fundamentals CSV URL (public raw 
 macro_period_years = st.sidebar.slider("Macro history (years)", 1, 5, 2)
 refresh_news = st.sidebar.button("Refresh News Now")
 force_actuals_refresh = st.sidebar.button("Force refresh actuals")
-
+# Optional: Show ETMarkets Picks
+et_enable = st.sidebar.checkbox("Show ETMarkets Picks", value=False)
 # Fetch macro series
 st.info("Fetching macro time series...")
 macro_map_timeseries = fetch_macro_timeseries(MACRO_TICKERS, period_years=macro_period_years)
