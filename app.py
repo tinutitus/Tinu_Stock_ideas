@@ -553,17 +553,45 @@ def fetch_actual_close_on_or_after(ticker, target_date, lookahead_days=7):
 def update_log_with_actuals(path=PRED_LOG_PATH, now_date=None, force=False):
     ensure_log_exists(path)
     df = read_pred_log(path)
-    if df.empty: return df
+    if df.empty:
+        return df
+
     now = datetime.utcnow().date() if now_date is None else pd.to_datetime(now_date).date()
     updated = False
-    for idx,row in df.iterrows():
+
+    for idx, row in df.iterrows():
         try:
             run_date = pd.to_datetime(row["run_date"]).date()
         except Exception:
             continue
+
+        # --- Handle 1M actual ---
         needs_1m = pd.isna(row.get("actual_1m")) or force
         target_1m = run_date + timedelta(days=30)
-        if needs_1m and target_1m <= now:
+        if needs_1m and target_1m is not pd.NaT and target_1m <= now:
+            price, price_date = fetch_actual_close_on_or_after(row["ticker"], target_1m, lookahead_days=7)
+            if not pd.isna(price):
+                df.at[idx,"actual_1m"] = price
+                df.at[idx,"actual_1m_date"] = price_date
+                pred = row.get("pred_1m", np.nan)
+                df.at[idx,"err_pct_1m"] = (abs(pred-price)/price*100) if (not pd.isna(pred) and price!=0) else np.nan
+                updated = True
+
+        # --- Handle 1Y actual ---
+        needs_1y = pd.isna(row.get("actual_1y")) or force
+        target_1y = run_date + timedelta(days=365)
+        if needs_1y and target_1y is not pd.NaT and target_1y <= now:
+            price, price_date = fetch_actual_close_on_or_after(row["ticker"], target_1y, lookahead_days=14)
+            if not pd.isna(price):
+                df.at[idx,"actual_1y"] = price
+                df.at[idx,"actual_1y_date"] = price_date
+                pred = row.get("pred_1y", np.nan)
+                df.at[idx,"err_pct_1y"] = (abs(pred-price)/price*100) if (not pd.isna(pred) and price!=0) else np.nan
+                updated = True
+
+    if updated:
+        write_pred_log(df)
+    return df
             price, price_date = fetch_actual_close_on_or_after(row["ticker"], target_1m, lookahead_days=7)
             if not pd.isna(price):
                 df.at[idx,"actual_1m"] = price; df.at[idx,"actual_1m_date"] = price_date
