@@ -607,9 +607,6 @@ force_actuals_refresh = st.sidebar.button("Force refresh actuals")
 et_enable = st.sidebar.checkbox("Show ETMarkets Picks", value=False)
 # ----- UI controls -----
 st.sidebar.header("Phase 1 Options")
-index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
-companies = fetch_constituents(index_choice)
-
 n_companies = len(companies) if companies else 0
 if n_companies > 0:
     min_tickers = 1 if n_companies < 10 else 10
