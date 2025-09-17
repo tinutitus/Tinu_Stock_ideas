@@ -794,8 +794,11 @@ if fund_csv_url:
         st.success(f"Loaded fundamentals for {len(fund_df)} tickers.")
 
 # Fetch price history
-tickers_subset = [t for _, t in companies[:limit]]
-st.info(f"Fetching price history for {len(tickers_subset)} tickers...")
+fund_holdings = fetch_motilal_midcap_holdings()
+fund_tickers = [t for t in fund_holdings["Ticker"].dropna().unique()] if not fund_holdings.empty else []
+
+tickers_subset = list(set([t for _, t in companies[:limit]] + fund_tickers))
+st.info(f"Fetching price history for {len(tickers_subset)} tickers (index + fund)...")
 price_data = batch_history(tickers_subset, years=4)
 price_map = {}
 for t in tickers_subset:
