@@ -167,6 +167,18 @@ def get_geo_snapshot():
     out["geo_news_risk"] = float(min(5.0, neg))
     return out
 
+
+# --- Ensure VIX adjustment variables are defined (safe defaults) ---
+try:
+    vix = fetch_vix()
+    adj1m = vix_to_adj(vix, "1M")
+    adj1y = vix_to_adj(vix, "1Y")
+except Exception:
+    vix = None
+    adj1m = 0.0
+    adj1y = 0.0
+# ---------------------------------------------------------------
+
 st.sidebar.header("Options & Environment")
 st.sidebar.write({"feedparser":_has_feedparser,"vader":_has_vader,"lightgbm":_has_lgb,"sklearn":_has_sklearn,"matplotlib":_has_matplotlib})
 index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
