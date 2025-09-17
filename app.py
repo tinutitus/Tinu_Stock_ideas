@@ -133,34 +133,36 @@ def _csv_to_pairs_fuzzy(csv_text: str):
 @st.cache_data(ttl=86400)
 def fetch_constituents(index_name: str):
     url = INDEX_URLS.get(index_name)
-    headers = {"User-Agent":"Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+
     if url:
         try:
             r = requests.get(url, headers=headers, timeout=10)
             r.raise_for_status()
 
-            content_type = r.headers.get("Content-Type", "")
-            text = r.text
+            # 🔹 Special handling for Smallcap 250
+            if "smallcap" in index_name.lower():
+                try:
+                    df = pd.read_csv(StringIO(r.text))
+                    if "Company Name" in df.columns and "Symbol" in df.columns:
+                        names = df["Company Name"].astype(str).str.strip().tolist()
+                        syms = df["Symbol"].astype(str).str.strip().apply(
+                            lambda s: s.upper() if s.upper().endswith(".NS") else s.upper() + ".NS"
+                        ).tolist()
+                        return list(zip(names, syms))
+                except Exception as e:
+                    st.warning(f"Smallcap parse failed, using fallback: {e}")
+                    return [(s, f"{s}.NS") for s in SMALLCAP_FALLBACK]
 
-            # If CSV
-            if "csv" in content_type.lower() or "," in text.splitlines()[0]:
-                pairs = _csv_to_pairs_fuzzy(text)
-                if pairs:
-                    return pairs
-
-            # If Excel
-            if r.content[:4] == b"PK\x03\x04":  # XLSX signature
-                import pandas as pd
-                from io import BytesIO
-                df = pd.read_excel(BytesIO(r.content))
-                names = df.iloc[:,0].astype(str).str.strip().tolist()
-                syms = df.iloc[:,1].astype(str).str.strip().apply(lambda s: s.upper() if s.upper().endswith(".NS") else s.upper()+".NS").tolist()
-                return list(zip(names, syms))
+            # 🔹 Default handling (Midcap & others)
+            pairs = _csv_to_pairs_fuzzy(r.text)
+            if pairs:
+                return pairs
 
         except Exception as e:
             st.warning(f"fetch_constituents error {index_name}: {e}")
 
-    # fallback if all else fails
+    # 🔹 Final fallback
     if "smallcap" in index_name.lower():
         return [(s, f"{s}.NS") for s in SMALLCAP_FALLBACK]
     return [(s, f"{s}.NS") for s in MIDCAP_FALLBACK]
