@@ -88,7 +88,75 @@ INDEX_URLS = {
 
 MIDCAP_FALLBACK = ["TATAMOTORS","HAVELLS","VOLTAS","PAGEIND","MINDTREE","MPHASIS","TORNTPHARM","POLYCAB","MPHASIS","TORNTPHARM"]
 SMALLCAP_FALLBACK = ["AARTIIND","AFFLE","DIXON","QUESS","SHREECEM"]
+# --- Motilal Midcap Fund helpers ---
+import yfinance as yf
+from bs4 import BeautifulSoup
 
+def map_name_to_ticker(name: str) -> str:
+    """
+    Try to map stock name from ET Money to NSE ticker (.NS).
+    Uses manual mappings and a simple heuristic.
+    """
+    manual_map = {
+        "Dixon Technologies (India) Ltd": "DIXON.NS",
+        "Coforge Ltd": "COFORGE.NS",
+        "Trent Ltd": "TRENT.NS",
+        "Kalyan Jewellers India Ltd": "KALYANKJIL.NS",
+        "Persistent Systems Ltd": "PERSISTENT.NS",
+        "Polycab India Ltd": "POLYCAB.NS",
+        "KEI Industries Ltd": "KEI.NS",
+        "One97 Communications Ltd": "PAYTM.NS",
+        "Eternal Ltd": None,  # Not listed in NSE? Skip
+    }
+    if name in manual_map:
+        return manual_map[name]
+
+    # Heuristic: try first word + .NS
+    guess = name.split()[0].upper() + ".NS"
+    try:
+        info = yf.Ticker(guess).info
+        if "regularMarketPrice" in info and info["regularMarketPrice"] is not None:
+            return guess
+    except Exception:
+        pass
+    return None
+
+
+@st.cache_data(ttl=86400)
+def fetch_motilal_midcap_holdings():
+    """
+    Scrape ET Money for Motilal Oswal Midcap Fund holdings.
+    Returns DataFrame with Stock, Ticker, Weight %.
+    """
+    url = "https://www.etmoney.com/mutual-funds/motilal-oswal-midcap-fund-direct-growth/portfolio-details/23602"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+    except Exception as e:
+        st.error(f"Failed to fetch ET Money holdings: {e}")
+        return pd.DataFrame()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    holdings = []
+
+    table = soup.find("table")
+    if not table:
+        return pd.DataFrame()
+
+    for tr in table.find_all("tr")[1:]:  # skip header
+        cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(cols) >= 2:
+            stock_name = cols[0]
+            weight_text = cols[1].replace("%", "").strip()
+            try:
+                weight = float(weight_text)
+            except:
+                weight = None
+            ticker = map_name_to_ticker(stock_name)
+            holdings.append({"Stock": stock_name, "Ticker": ticker, "Weight %": weight})
+
+    return pd.DataFrame(holdings)
 def _csv_to_pairs_fuzzy(csv_text: str):
     csv_text = (csv_text or "").strip()
     if not csv_text:
@@ -849,6 +917,50 @@ def color_ret(v):
     if v < 0: return "color: red"
     return ""
 st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), use_container_width=True)
+# --- Motilal Midcap Fund Integration ---
+st.markdown("---")
+st.header("🏦 Motilal Oswal Midcap Fund — Holdings with Predictions")
+
+fund_holdings = fetch_motilal_midcap_holdings()
+
+if not fund_holdings.empty:
+    # Filter your existing predictions (final DataFrame) to include only fund tickers
+    fund_preds = final[final["Ticker"].isin(fund_holdings["Ticker"].dropna())].copy()
+
+    if not fund_preds.empty:
+        # Merge weight % into predictions
+        fund_preds = fund_preds.merge(
+            fund_holdings[["Ticker","Weight %"]],
+            on="Ticker",
+            how="left"
+        )
+
+        # Add weighted contribution of each stock
+        fund_preds["Weighted 1M Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1M %"] / 100
+        fund_preds["Weighted 1Y Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1Y %"] / 100
+
+        # Reorder columns
+        cols = ["Company","Ticker","Weight %","Current","Pred 1M","Pred 1Y",
+                "Ret 1M %","Ret 1Y %","Composite Rank","Rank Ret 1M","Rank Ret 1Y","Method"]
+        fund_preds = fund_preds[cols].sort_values("Composite Rank").reset_index(drop=True)
+
+        # Display styled table
+        st.dataframe(
+            fund_preds.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]),
+            use_container_width=True
+        )
+
+        # Fund-level summary (weighted)
+        fund_pred_1m = fund_preds["Weighted 1M Ret"].sum()
+        fund_pred_1y = fund_preds["Weighted 1Y Ret"].sum()
+        c1, c2 = st.columns(2)
+        c1.metric("Fund Predicted Return (1M)", f"{fund_pred_1m:+.2f}%")
+        c2.metric("Fund Predicted Return (1Y)", f"{fund_pred_1y:+.2f}%")
+
+    else:
+        st.warning("No overlapping tickers found between fund holdings and your screener universe.")
+else:
+    st.warning("Could not fetch Motilal Midcap Fund holdings right now.")
 # ----- ETMarkets Picks Section -----
 if et_enable:
     st.subheader("📌 ETMarkets Expert Picks")
