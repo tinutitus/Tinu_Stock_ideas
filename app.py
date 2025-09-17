@@ -83,7 +83,7 @@ def write_pred_log(df, path=PRED_LOG_PATH):
 # Constituents fetching (robust)
 INDEX_URLS = {
     "Nifty Midcap 100":   "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
-    "Nifty Smallcap 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
+    "Nifty Smallcap 250": "https://www.niftyindices.com/Backpage.aspx?indexType=ind_niftysmallcap250list",
 }
 
 MIDCAP_FALLBACK = ["TATAMOTORS","HAVELLS","VOLTAS","PAGEIND","MINDTREE","MPHASIS","TORNTPHARM","POLYCAB","MPHASIS","TORNTPHARM"]
