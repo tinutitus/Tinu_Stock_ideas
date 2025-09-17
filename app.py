@@ -88,133 +88,7 @@ INDEX_URLS = {
 
 MIDCAP_FALLBACK = ["TATAMOTORS","HAVELLS","VOLTAS","PAGEIND","MINDTREE","MPHASIS","TORNTPHARM","POLYCAB","MPHASIS","TORNTPHARM"]
 SMALLCAP_FALLBACK = ["AARTIIND","AFFLE","DIXON","QUESS","SHREECEM"]
-# --- Motilal Midcap Fund helpers ---
-import yfinance as yf
-from bs4 import BeautifulSoup
 
-def map_name_to_ticker(name: str) -> str:
-    manual_map = {
-        "Dixon Technologies (India) Ltd": "DIXON.NS",
-        "Coforge Ltd": "COFORGE.NS",
-        "Trent Ltd": "TRENT.NS",
-        "Kalyan Jewellers India Ltd": "KALYANKJIL.NS",
-        "Persistent Systems Ltd": "PERSISTENT.NS",
-        "Polycab India Ltd": "POLYCAB.NS",
-        "KEI Industries Ltd": "KEI.NS",
-        "One97 Communications Ltd": "PAYTM.NS",
-        "Eternal Ltd": None,
-    }
-    if name in manual_map:
-        return manual_map[name]
-
-    # Heuristic fallback
-    guess = name.split()[0].upper() + ".NS"
-    try:
-        info = yf.Ticker(guess).info
-        if "regularMarketPrice" in info and info["regularMarketPrice"] is not None:
-            return guess
-    except Exception:
-        pass
-    return None
-
-@st.cache_data(ttl=86400)
-def fetch_motilal_midcap_holdings():
-    url = "https://www.etmoney.com/mutual-funds/motilal-oswal-midcap-fund-direct-growth/portfolio-details/23602"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-    except Exception:
-        return pd.DataFrame()
-
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(r.text, "html.parser")
-    holdings = []
-    table = soup.find("table")
-    if not table:
-        return pd.DataFrame()
-
-    for tr in table.find_all("tr")[1:]:
-        cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(cols) >= 2:
-            stock_name = cols[0]
-            weight_text = cols[1].replace("%", "").strip()
-            try:
-                weight = float(weight_text)
-            except:
-                weight = None
-            ticker = map_name_to_ticker(stock_name)
-            holdings.append({"Stock": stock_name, "Ticker": ticker, "Weight %": weight})
-    return pd.DataFrame(holdings)
-# --- Motilal Midcap Fund helpers ---
-import yfinance as yf
-from bs4 import BeautifulSoup
-
-def map_name_to_ticker(name: str) -> str:
-    """
-    Try to map stock name from ET Money to NSE ticker (.NS).
-    Uses manual mappings and a simple heuristic.
-    """
-    manual_map = {
-        "Dixon Technologies (India) Ltd": "DIXON.NS",
-        "Coforge Ltd": "COFORGE.NS",
-        "Trent Ltd": "TRENT.NS",
-        "Kalyan Jewellers India Ltd": "KALYANKJIL.NS",
-        "Persistent Systems Ltd": "PERSISTENT.NS",
-        "Polycab India Ltd": "POLYCAB.NS",
-        "KEI Industries Ltd": "KEI.NS",
-        "One97 Communications Ltd": "PAYTM.NS",
-        "Eternal Ltd": None,  # Not listed in NSE? Skip
-    }
-    if name in manual_map:
-        return manual_map[name]
-
-    # Heuristic: try first word + .NS
-    guess = name.split()[0].upper() + ".NS"
-    try:
-        info = yf.Ticker(guess).info
-        if "regularMarketPrice" in info and info["regularMarketPrice"] is not None:
-            return guess
-    except Exception:
-        pass
-    return None
-
-
-@st.cache_data(ttl=86400)
-def fetch_motilal_midcap_holdings():
-    """
-    Scrape ET Money for Motilal Oswal Midcap Fund holdings.
-    Returns DataFrame with Stock, Ticker, Weight %.
-    """
-    url = "https://www.etmoney.com/mutual-funds/motilal-oswal-midcap-fund-direct-growth/portfolio-details/23602"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        st.error(f"Failed to fetch ET Money holdings: {e}")
-        return pd.DataFrame()
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    holdings = []
-
-    table = soup.find("table")
-    if not table:
-        return pd.DataFrame()
-
-    for tr in table.find_all("tr")[1:]:  # skip header
-        cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(cols) >= 2:
-            stock_name = cols[0]
-            weight_text = cols[1].replace("%", "").strip()
-            try:
-                weight = float(weight_text)
-            except:
-                weight = None
-            ticker = map_name_to_ticker(stock_name)
-            holdings.append({"Stock": stock_name, "Ticker": ticker, "Weight %": weight})
-
-    return pd.DataFrame(holdings)
 def _csv_to_pairs_fuzzy(csv_text: str):
     csv_text = (csv_text or "").strip()
     if not csv_text:
@@ -675,49 +549,40 @@ def fetch_actual_close_on_or_after(ticker, target_date, lookahead_days=7):
         return price, pd.to_datetime(hist.index[0]).date()
     except Exception:
         return np.nan, None
+
 def update_log_with_actuals(path=PRED_LOG_PATH, now_date=None, force=False):
     ensure_log_exists(path)
     df = read_pred_log(path)
-    if df.empty:
-        return df
-
+    if df.empty: return df
     now = datetime.utcnow().date() if now_date is None else pd.to_datetime(now_date).date()
     updated = False
-
-    for idx, row in df.iterrows():
+    for idx,row in df.iterrows():
         try:
             run_date = pd.to_datetime(row["run_date"]).date()
         except Exception:
             continue
-
-        # --- Handle 1M actual ---
         needs_1m = pd.isna(row.get("actual_1m")) or force
         target_1m = run_date + timedelta(days=30)
-        if needs_1m and pd.notna(target_1m) and target_1m <= now:
+        if needs_1m and target_1m <= now:
             price, price_date = fetch_actual_close_on_or_after(row["ticker"], target_1m, lookahead_days=7)
             if not pd.isna(price):
-                df.at[idx, "actual_1m"] = price
-                df.at[idx, "actual_1m_date"] = price_date
+                df.at[idx,"actual_1m"] = price; df.at[idx,"actual_1m_date"] = price_date
                 pred = row.get("pred_1m", np.nan)
-                df.at[idx, "err_pct_1m"] = (abs(pred - price) / price * 100) if (not pd.isna(pred) and price != 0) else np.nan
+                df.at[idx,"err_pct_1m"] = (abs(pred-price)/price*100) if (not pd.isna(pred) and price!=0) else np.nan
                 updated = True
-
-        # --- Handle 1Y actual ---
         needs_1y = pd.isna(row.get("actual_1y")) or force
         target_1y = run_date + timedelta(days=365)
-        if needs_1y and pd.notna(target_1y) and target_1y <= now:
+        if needs_1y and target_1y <= now:
             price, price_date = fetch_actual_close_on_or_after(row["ticker"], target_1y, lookahead_days=14)
             if not pd.isna(price):
-                df.at[idx, "actual_1y"] = price
-                df.at[idx, "actual_1y_date"] = price_date
+                df.at[idx,"actual_1y"] = price; df.at[idx,"actual_1y_date"] = price_date
                 pred = row.get("pred_1y", np.nan)
-                df.at[idx, "err_pct_1y"] = (abs(pred - price) / price * 100) if (not pd.isna(pred) and price != 0) else np.nan
+                df.at[idx,"err_pct_1y"] = (abs(pred-price)/price*100) if (not pd.isna(pred) and price!=0) else np.nan
                 updated = True
-
     if updated:
         write_pred_log(df)
-
     return df
+
 # UI controls
 st.sidebar.header("Phase 2 Options (fixed)")
 index_choice = st.sidebar.selectbox("Index", list(INDEX_URLS.keys()))
@@ -738,27 +603,11 @@ fund_csv_url = st.sidebar.text_input("Optional fundamentals CSV URL (public raw 
 macro_period_years = st.sidebar.slider("Macro history (years)", 1, 5, 2)
 refresh_news = st.sidebar.button("Refresh News Now")
 force_actuals_refresh = st.sidebar.button("Force refresh actuals")
-# Optional: Show ETMarkets Picks
-et_enable = st.sidebar.checkbox("Show ETMarkets Picks", value=False)
-# ----- UI controls -----
-st.sidebar.header("Phase 1 Options")
-n_companies = len(companies) if companies else 0
-if n_companies > 0:
-    min_tickers = 1 if n_companies < 10 else 10
-    max_tickers = n_companies
-    default_tickers = min(50, n_companies)
-    step = 1 if n_companies < 50 else 5
-    limit = st.sidebar.slider("Tickers to process",
-                              min_value=min_tickers,
-                              max_value=max_tickers,
-                              value=default_tickers,
-                              step=step)
-else:
-    st.sidebar.warning("⚠️ No companies found for this index.")
-    limit = 0
+
 # Fetch macro series
 st.info("Fetching macro time series...")
 macro_map_timeseries = fetch_macro_timeseries(MACRO_TICKERS, period_years=macro_period_years)
+
 # Ensure VIX adjustments are defined (avoid NameError)
 try:
     vix = fetch_vix()
@@ -794,11 +643,8 @@ if fund_csv_url:
         st.success(f"Loaded fundamentals for {len(fund_df)} tickers.")
 
 # Fetch price history
-fund_holdings = fetch_motilal_midcap_holdings()
-fund_tickers = [t for t in fund_holdings["Ticker"].dropna().unique()] if not fund_holdings.empty else []
-
-tickers_subset = list(set([t for _, t in companies[:limit]] + fund_tickers))
-st.info(f"Fetching price history for {len(tickers_subset)} tickers (index + fund)...")
+tickers_subset = [t for _, t in companies[:limit]]
+st.info(f"Fetching price history for {len(tickers_subset)} tickers...")
 price_data = batch_history(tickers_subset, years=4)
 price_map = {}
 for t in tickers_subset:
@@ -977,99 +823,7 @@ def color_ret(v):
     if v > 0: return "color: green"
     if v < 0: return "color: red"
     return ""
-# --- Motilal Fund Integration ---
-st.markdown("---")
-st.header("🏦 Motilal Oswal Midcap Fund — Holdings with Predictions")
-
-if not fund_holdings.empty:
-    fund_preds = final[final["Ticker"].isin(fund_holdings["Ticker"].dropna())].copy()
-
-    if not fund_preds.empty:
-        fund_preds = fund_preds.merge(
-            fund_holdings[["Ticker","Weight %"]],
-            on="Ticker", how="left"
-        )
-        fund_preds["Weighted 1M Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1M %"] / 100
-        fund_preds["Weighted 1Y Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1Y %"] / 100
-
-        cols = ["Company","Ticker","Weight %","Current","Pred 1M","Pred 1Y",
-                "Ret 1M %","Ret 1Y %","Composite Rank","Rank Ret 1M","Rank Ret 1Y","Method"]
-        available_cols = [c for c in cols if c in fund_preds.columns]
-        fund_preds = fund_preds[available_cols].reset_index(drop=True)
-
-        st.dataframe(
-            fund_preds.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]),
-            use_container_width=True
-        )
-
-        # Weighted summary
-        fund_pred_1m = fund_preds["Weighted 1M Ret"].sum()
-        fund_pred_1y = fund_preds["Weighted 1Y Ret"].sum()
-        c1, c2 = st.columns(2)
-        c1.metric("Fund Predicted Return (1M)", f"{fund_pred_1m:+.2f}%")
-        c2.metric("Fund Predicted Return (1Y)", f"{fund_pred_1y:+.2f}%")
-    else:
-        st.warning("No fund tickers found in predictions.")
-else:
-    st.warning("Could not fetch Motilal Midcap Fund holdings right now.")
-# --- Motilal Midcap Fund Integration ---
-st.markdown("---")
-st.header("🏦 Motilal Oswal Midcap Fund — Holdings with Predictions")
-
-fund_holdings = fetch_motilal_midcap_holdings()
-
-if not fund_holdings.empty:
-    # Filter your existing predictions (final DataFrame) to include only fund tickers
-    fund_preds = final[final["Ticker"].isin(fund_holdings["Ticker"].dropna())].copy()
-
-    if not fund_preds.empty:
-        # Merge weight % into predictions
-        fund_preds = fund_preds.merge(
-            fund_holdings[["Ticker","Weight %"]],
-            on="Ticker",
-            how="left"
-        )
-
-        # Add weighted contribution of each stock
-        fund_preds["Weighted 1M Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1M %"] / 100
-        fund_preds["Weighted 1Y Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1Y %"] / 100
-
-        # Reorder columns
-        cols = ["Company","Ticker","Weight %","Current","Pred 1M","Pred 1Y",
-                "Ret 1M %","Ret 1Y %","Composite Rank","Rank Ret 1M","Rank Ret 1Y","Method"]
-        fund_preds = fund_preds[cols].sort_values("Composite Rank").reset_index(drop=True)
-
-        # Display styled table
-        st.dataframe(
-            fund_preds.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]),
-            use_container_width=True
-        )
-
-        # Fund-level summary (weighted)
-        fund_pred_1m = fund_preds["Weighted 1M Ret"].sum()
-        fund_pred_1y = fund_preds["Weighted 1Y Ret"].sum()
-        c1, c2 = st.columns(2)
-        c1.metric("Fund Predicted Return (1M)", f"{fund_pred_1m:+.2f}%")
-        c2.metric("Fund Predicted Return (1Y)", f"{fund_pred_1y:+.2f}%")
-
-    else:
-        st.warning("No overlapping tickers found between fund holdings and your screener universe.")
-else:
-    st.warning("Could not fetch Motilal Midcap Fund holdings right now.")
-# ----- ETMarkets Picks Section -----
-if et_enable:
-    st.subheader("📌 ETMarkets Expert Picks")
-    
-    # Temporary placeholder (until we add scraping/API)
-    demo_data = {
-        "Company": ["HDFC Bank", "Infosys", "Tata Motors"],
-        "Ticker": ["HDFCBANK.NS", "INFY.NS", "TATAMOTORS.NS"],
-        "ET Rating": ["Buy", "Hold", "Buy"],
-        "Target Price (₹)": [1800, 1550, 700]
-    }
-    et_df = pd.DataFrame(demo_data)
-    
-    st.dataframe(et_df, use_container_width=True)
+st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), use_container_width=True)
 
 # append to integrated log
 ensure_log_exists()
