@@ -977,7 +977,41 @@ def color_ret(v):
     if v > 0: return "color: green"
     if v < 0: return "color: red"
     return ""
-st.dataframe(final.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]), use_container_width=True)
+# --- Motilal Fund Integration ---
+st.markdown("---")
+st.header("🏦 Motilal Oswal Midcap Fund — Holdings with Predictions")
+
+if not fund_holdings.empty:
+    fund_preds = final[final["Ticker"].isin(fund_holdings["Ticker"].dropna())].copy()
+
+    if not fund_preds.empty:
+        fund_preds = fund_preds.merge(
+            fund_holdings[["Ticker","Weight %"]],
+            on="Ticker", how="left"
+        )
+        fund_preds["Weighted 1M Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1M %"] / 100
+        fund_preds["Weighted 1Y Ret"] = fund_preds["Weight %"] * fund_preds["Ret 1Y %"] / 100
+
+        cols = ["Company","Ticker","Weight %","Current","Pred 1M","Pred 1Y",
+                "Ret 1M %","Ret 1Y %","Composite Rank","Rank Ret 1M","Rank Ret 1Y","Method"]
+        available_cols = [c for c in cols if c in fund_preds.columns]
+        fund_preds = fund_preds[available_cols].reset_index(drop=True)
+
+        st.dataframe(
+            fund_preds.style.applymap(color_ret, subset=["Ret 1M %","Ret 1Y %"]),
+            use_container_width=True
+        )
+
+        # Weighted summary
+        fund_pred_1m = fund_preds["Weighted 1M Ret"].sum()
+        fund_pred_1y = fund_preds["Weighted 1Y Ret"].sum()
+        c1, c2 = st.columns(2)
+        c1.metric("Fund Predicted Return (1M)", f"{fund_pred_1m:+.2f}%")
+        c2.metric("Fund Predicted Return (1Y)", f"{fund_pred_1y:+.2f}%")
+    else:
+        st.warning("No fund tickers found in predictions.")
+else:
+    st.warning("Could not fetch Motilal Midcap Fund holdings right now.")
 # --- Motilal Midcap Fund Integration ---
 st.markdown("---")
 st.header("🏦 Motilal Oswal Midcap Fund — Holdings with Predictions")
