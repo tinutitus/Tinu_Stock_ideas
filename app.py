@@ -83,7 +83,7 @@ def write_pred_log(df, path=PRED_LOG_PATH):
 # Constituents fetching (robust)
 INDEX_URLS = {
     "Nifty Midcap 100":   "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap100list.csv",
-    "Nifty Smallcap 250": "https://www.niftyindices.com/Backpage.aspx?indexType=ind_niftysmallcap250list",
+    "Nifty Smallcap 250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
 }
 
 MIDCAP_FALLBACK = ["TATAMOTORS","HAVELLS","VOLTAS","PAGEIND","MINDTREE","MPHASIS","TORNTPHARM","POLYCAB","MPHASIS","TORNTPHARM"]
@@ -133,40 +133,24 @@ def _csv_to_pairs_fuzzy(csv_text: str):
 @st.cache_data(ttl=86400)
 def fetch_constituents(index_name: str):
     url = INDEX_URLS.get(index_name)
-    headers = {"User-Agent": "Mozilla/5.0"}
-
+    headers = {"User-Agent":"Mozilla/5.0"}
+    debug_notes=[]
     if url:
         try:
-            r = requests.get(url, headers=headers, timeout=10)
-            r.raise_for_status()
-
-            # 🔹 Try direct pandas read first
-            try:
-                df = pd.read_csv(StringIO(r.text))
-                # Standard NSE format has "Company Name" and "Symbol"
-                if "Company Name" in df.columns and "Symbol" in df.columns:
-                    names = df["Company Name"].astype(str).str.strip().tolist()
-                    syms = df["Symbol"].astype(str).str.strip().apply(
-                        lambda s: s.upper() if s.upper().endswith(".NS") else s.upper() + ".NS"
-                    ).tolist()
-                    pairs = list(zip(names, syms))
-                    if pairs:
-                        return pairs
-            except Exception as e:
-                st.warning(f"Direct CSV parse failed for {index_name}: {e}")
-
-            # 🔹 Fallback: fuzzy parsing
+            r = requests.get(url, headers=headers, timeout=8)
+            debug_notes.append(f"status {r.status_code}")
             pairs = _csv_to_pairs_fuzzy(r.text)
             if pairs:
                 return pairs
-
+            else:
+                debug_notes.append("parsed 0 pairs")
         except Exception as e:
-            st.warning(f"fetch_constituents error {index_name}: {e}")
-
-    # 🔹 Final fallback (static)
+            debug_notes.append(f"error: {type(e).__name__}:{e}")
+    # fallback
     if "smallcap" in index_name.lower():
         return [(s, f"{s}.NS") for s in SMALLCAP_FALLBACK]
     return [(s, f"{s}.NS") for s in MIDCAP_FALLBACK]
+
 # Fundamentals ingestion
 @st.cache_data(ttl=FUND_CSV_CACHE_TTL)
 def fetch_fundamentals_csv(url: str):
