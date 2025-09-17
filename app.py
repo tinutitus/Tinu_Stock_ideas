@@ -93,6 +93,64 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 
 def map_name_to_ticker(name: str) -> str:
+    manual_map = {
+        "Dixon Technologies (India) Ltd": "DIXON.NS",
+        "Coforge Ltd": "COFORGE.NS",
+        "Trent Ltd": "TRENT.NS",
+        "Kalyan Jewellers India Ltd": "KALYANKJIL.NS",
+        "Persistent Systems Ltd": "PERSISTENT.NS",
+        "Polycab India Ltd": "POLYCAB.NS",
+        "KEI Industries Ltd": "KEI.NS",
+        "One97 Communications Ltd": "PAYTM.NS",
+        "Eternal Ltd": None,
+    }
+    if name in manual_map:
+        return manual_map[name]
+
+    # Heuristic fallback
+    guess = name.split()[0].upper() + ".NS"
+    try:
+        info = yf.Ticker(guess).info
+        if "regularMarketPrice" in info and info["regularMarketPrice"] is not None:
+            return guess
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=86400)
+def fetch_motilal_midcap_holdings():
+    url = "https://www.etmoney.com/mutual-funds/motilal-oswal-midcap-fund-direct-growth/portfolio-details/23602"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+    except Exception:
+        return pd.DataFrame()
+
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(r.text, "html.parser")
+    holdings = []
+    table = soup.find("table")
+    if not table:
+        return pd.DataFrame()
+
+    for tr in table.find_all("tr")[1:]:
+        cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(cols) >= 2:
+            stock_name = cols[0]
+            weight_text = cols[1].replace("%", "").strip()
+            try:
+                weight = float(weight_text)
+            except:
+                weight = None
+            ticker = map_name_to_ticker(stock_name)
+            holdings.append({"Stock": stock_name, "Ticker": ticker, "Weight %": weight})
+    return pd.DataFrame(holdings)
+# --- Motilal Midcap Fund helpers ---
+import yfinance as yf
+from bs4 import BeautifulSoup
+
+def map_name_to_ticker(name: str) -> str:
     """
     Try to map stock name from ET Money to NSE ticker (.NS).
     Uses manual mappings and a simple heuristic.
