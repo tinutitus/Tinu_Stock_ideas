@@ -134,19 +134,33 @@ def _csv_to_pairs_fuzzy(csv_text: str):
 def fetch_constituents(index_name: str):
     url = INDEX_URLS.get(index_name)
     headers = {"User-Agent":"Mozilla/5.0"}
-    debug_notes=[]
     if url:
         try:
-            r = requests.get(url, headers=headers, timeout=8)
-            debug_notes.append(f"status {r.status_code}")
-            pairs = _csv_to_pairs_fuzzy(r.text)
-            if pairs:
-                return pairs
-            else:
-                debug_notes.append("parsed 0 pairs")
+            r = requests.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+
+            content_type = r.headers.get("Content-Type", "")
+            text = r.text
+
+            # If CSV
+            if "csv" in content_type.lower() or "," in text.splitlines()[0]:
+                pairs = _csv_to_pairs_fuzzy(text)
+                if pairs:
+                    return pairs
+
+            # If Excel
+            if r.content[:4] == b"PK\x03\x04":  # XLSX signature
+                import pandas as pd
+                from io import BytesIO
+                df = pd.read_excel(BytesIO(r.content))
+                names = df.iloc[:,0].astype(str).str.strip().tolist()
+                syms = df.iloc[:,1].astype(str).str.strip().apply(lambda s: s.upper() if s.upper().endswith(".NS") else s.upper()+".NS").tolist()
+                return list(zip(names, syms))
+
         except Exception as e:
-            debug_notes.append(f"error: {type(e).__name__}:{e}")
-    # fallback
+            st.warning(f"fetch_constituents error {index_name}: {e}")
+
+    # fallback if all else fails
     if "smallcap" in index_name.lower():
         return [(s, f"{s}.NS") for s in SMALLCAP_FALLBACK]
     return [(s, f"{s}.NS") for s in MIDCAP_FALLBACK]
