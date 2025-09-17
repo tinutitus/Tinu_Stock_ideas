@@ -140,21 +140,22 @@ def fetch_constituents(index_name: str):
             r = requests.get(url, headers=headers, timeout=10)
             r.raise_for_status()
 
-            # 🔹 Special handling for Smallcap 250
-            if "smallcap" in index_name.lower():
-                try:
-                    df = pd.read_csv(StringIO(r.text))
-                    if "Company Name" in df.columns and "Symbol" in df.columns:
-                        names = df["Company Name"].astype(str).str.strip().tolist()
-                        syms = df["Symbol"].astype(str).str.strip().apply(
-                            lambda s: s.upper() if s.upper().endswith(".NS") else s.upper() + ".NS"
-                        ).tolist()
-                        return list(zip(names, syms))
-                except Exception as e:
-                    st.warning(f"Smallcap parse failed, using fallback: {e}")
-                    return [(s, f"{s}.NS") for s in SMALLCAP_FALLBACK]
+            # 🔹 Try direct pandas read first
+            try:
+                df = pd.read_csv(StringIO(r.text))
+                # Standard NSE format has "Company Name" and "Symbol"
+                if "Company Name" in df.columns and "Symbol" in df.columns:
+                    names = df["Company Name"].astype(str).str.strip().tolist()
+                    syms = df["Symbol"].astype(str).str.strip().apply(
+                        lambda s: s.upper() if s.upper().endswith(".NS") else s.upper() + ".NS"
+                    ).tolist()
+                    pairs = list(zip(names, syms))
+                    if pairs:
+                        return pairs
+            except Exception as e:
+                st.warning(f"Direct CSV parse failed for {index_name}: {e}")
 
-            # 🔹 Default handling (Midcap & others)
+            # 🔹 Fallback: fuzzy parsing
             pairs = _csv_to_pairs_fuzzy(r.text)
             if pairs:
                 return pairs
@@ -162,11 +163,10 @@ def fetch_constituents(index_name: str):
         except Exception as e:
             st.warning(f"fetch_constituents error {index_name}: {e}")
 
-    # 🔹 Final fallback
+    # 🔹 Final fallback (static)
     if "smallcap" in index_name.lower():
         return [(s, f"{s}.NS") for s in SMALLCAP_FALLBACK]
     return [(s, f"{s}.NS") for s in MIDCAP_FALLBACK]
-
 # Fundamentals ingestion
 @st.cache_data(ttl=FUND_CSV_CACHE_TTL)
 def fetch_fundamentals_csv(url: str):
